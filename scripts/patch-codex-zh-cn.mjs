@@ -13,6 +13,11 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { planI18nGatePatches } from "./lib/patch-i18n-gate.mjs";
 import {
+  activateStagedCore,
+  prepareStagedCore,
+  rollbackActivatedCore,
+} from "./lib/core-file-transaction.mjs";
+import {
   applyZhCnLocale,
   captureLocaleState,
   readLocaleState,
@@ -335,14 +340,23 @@ function syncExeAsarIntegrity(codexDir, asarPath) {
     return;
   }
 
-  backupFile(exePath, getInstallBackupRoot(codexDir));
-
   const newHashBytes = Buffer.from(headerHash, "ascii");
   newHashBytes.copy(exeData, hashOffset);
   writeInstallFile(exePath, exeData);
   console.log(
     `[ok] 已更新 ${path.basename(exePath)} 完整性哈希: ${currentHash} -> ${headerHash}`
   );
+}
+
+function verifyPatchedAsar(asarPath) {
+  const result = spawnSync(process.execPath, [path.join(__dirname, "verify-patch.mjs"), asarPath], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    throw new Error(`Staged app.asar semantic verification failed${detail ? `: ${detail}` : ""}`);
+  }
+  if (result.stdout) process.stdout.write(result.stdout);
 }
 
 function resolveCodexInstallDir(dir) {
@@ -1035,27 +1049,6 @@ function patchZhBundle(content, menuTitleMap) {
   return { buffer: Buffer.from(text, "utf8"), count: additions.length };
 }
 
-function backupFile(filePath, backupRoot) {
-  if (!fs.existsSync(filePath)) return;
-  const rel = path.basename(filePath);
-  const target = path.join(backupRoot, rel);
-  if (!fs.existsSync(target)) {
-    fs.mkdirSync(backupRoot, { recursive: true });
-    fs.copyFileSync(filePath, target);
-    console.log(`[backup] ${rel}`);
-  }
-}
-
-function restoreBackup(backupRoot, targetDir, fileName) {
-  const source = path.join(backupRoot, fileName);
-  const target = path.join(targetDir, fileName);
-  if (!fs.existsSync(source)) return false;
-  ensureInstallWritable(target);
-  writeInstallFile(target, fs.readFileSync(source));
-  console.log(`[restore] ${fileName}`);
-  return true;
-}
-
 function getCodexHome() {
   return path.join(os.homedir(), ".codex");
 }
@@ -1547,8 +1540,13 @@ function install(options) {
 
   const target = resolvePatchTarget(installInfo, { skipStop: true });
   const { app, resources, mode, sourceApp, patchedRoot } = target;
-  const asarPath = path.join(resources, "app.asar");
+  const activeAsarPath = path.join(resources, "app.asar");
+  const exePath = ["Codex.exe", "codex.exe"]
+    .map((name) => path.join(app, name))
+    .find((candidate) => fs.existsSync(candidate));
+  if (!exePath) throw new Error("未找到 Codex.exe / codex.exe，无法安全激活核心补丁。");
   const backupRoot = getInstallBackupRoot(app);
+  const stageRoot = path.join(backupRoot, "staged-core");
 
   if (mode === "store-copy") {
     logInfo(`Store 源目录: ${sourceApp}`);
@@ -1558,13 +1556,12 @@ function install(options) {
   logInfo(`备份目录: ${backupRoot}`);
 
   if (mode === "in-place") {
-    prepareInstallWriteAccess(app, resources, asarPath);
+    prepareInstallWriteAccess(app, resources, activeAsarPath);
   }
 
-  backupFile(asarPath, backupRoot);
-  backupFile(path.join(app, "Codex.exe"), backupRoot);
-  backupFile(path.join(app, "codex.exe"), backupRoot);
-  logOk("备份完成。");
+  const transaction = prepareStagedCore({ asarPath: activeAsarPath, exePath, stageRoot, backupRoot });
+  const asarPath = transaction.stagedAsarPath;
+  logOk("核心文件已暂存，原始文件保持未改动。");
 
   progressLog(5, INSTALL_STEP_TOTAL, "写入 app.asar 汉化补丁…");
   const nativeMenu = loadJson("native-menu-zh-CN.json");
@@ -1623,13 +1620,17 @@ function install(options) {
 
   const i18nGate = patchI18nGateInAsar(asarPath);
   logI18nGateReport(i18nGate);
-  syncExeAsarIntegrity(app, asarPath);
+  syncExeAsarIntegrity(path.dirname(transaction.stagedExePath), asarPath);
 
   progressLog(6, INSTALL_STEP_TOTAL, "汉化 webview 与界面文案…");
   const webviewPatchCount = patchWebviewBundles(asarPath);
   if (webviewPatchCount > 0) {
     logOk(`已补丁 webview 文案 ${webviewPatchCount} 个文件`);
   }
+
+  verifyPatchedAsar(asarPath);
+  activateStagedCore(transaction);
+  logOk("已原子激活 app.asar 与 Codex 可执行文件。");
 
   progressLog(7, INSTALL_STEP_TOTAL, "设置语言并汉化内置插件…");
   const configPath = path.join(getCodexHome(), "config.toml");
@@ -1668,16 +1669,21 @@ function uninstall(options) {
   const target = resolvePatchTarget(installInfo, { preferExistingCopy: true });
   const { app, resources, mode } = target;
   const asarPath = path.join(resources, "app.asar");
+  const exePath = ["Codex.exe", "codex.exe"]
+    .map((name) => path.join(app, name))
+    .find((candidate) => fs.existsSync(candidate));
+  if (!exePath) throw new Error("未找到 Codex.exe / codex.exe，无法安全回滚核心补丁。");
   const backupRoot = resolveBackupRoot(app, resources);
+  const stageRoot = path.join(backupRoot, "staged-core");
   if (mode === "in-place") {
     prepareInstallWriteAccess(app, resources, asarPath);
   }
 
-  if (restoreBackup(backupRoot, resources, "app.asar")) {
-    syncExeAsarIntegrity(app, asarPath);
-  }
-  for (const exeName of ["Codex.exe", "codex.exe"]) {
-    restoreBackup(backupRoot, app, exeName);
+  const backupExePath = path.join(backupRoot, path.basename(exePath));
+  if (fs.existsSync(path.join(backupRoot, "app.asar")) || fs.existsSync(backupExePath)) {
+    const transaction = prepareStagedCore({ asarPath, exePath, stageRoot, backupRoot });
+    rollbackActivatedCore(transaction);
+    logOk("已从核心文件备份对回滚 app.asar 与 Codex 可执行文件。");
   }
   const configPath = path.join(getCodexHome(), "config.toml");
   const localeStatePath = path.join(backupRoot, "locale-state.json");
