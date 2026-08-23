@@ -45,6 +45,7 @@ function getSwapPaths(activePath) {
   return {
     newPath: path.join(dir, `${name}.zhcn-new`),
     oldPath: path.join(dir, `${name}.zhcn-old`),
+    lockPath: path.join(dir, `${name}.zhcn-lock`),
   };
 }
 
@@ -54,8 +55,70 @@ function getTransactionSwapPaths(transaction) {
   return [asar.newPath, asar.oldPath, exe.newPath, exe.oldPath];
 }
 
-function assertSwapPathsAvailable(transaction) {
-  const swapPaths = getTransactionSwapPaths(transaction);
+function getTransactionLockPaths(transaction) {
+  return [getSwapPaths(transaction.asarPath).lockPath, getSwapPaths(transaction.exePath).lockPath];
+}
+
+function getBackupTempPaths(transaction) {
+  return [
+    `${transaction.backupAsarPath}.zhcn-backup-new`,
+    `${transaction.backupExePath}.zhcn-backup-new`,
+  ];
+}
+
+function createOperationState() {
+  return { ownedFiles: new Set(), ownedLocks: new Set() };
+}
+
+function copyExclusive(sourcePath, targetPath, state) {
+  fs.copyFileSync(sourcePath, targetPath, fs.constants.COPYFILE_EXCL);
+  state.ownedFiles.add(targetPath);
+}
+
+function unlinkOwnedPath(filePath, state) {
+  if (!state.ownedFiles.has(filePath)) return;
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  state.ownedFiles.delete(filePath);
+}
+
+function cleanupOwnedFiles(state) {
+  const errors = [];
+  for (const filePath of [...state.ownedFiles]) {
+    try {
+      unlinkOwnedPath(filePath, state);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) return errors[0];
+  if (errors.length > 1) return new AggregateError(errors, "Could not clean transaction files.");
+  return null;
+}
+
+function releaseLocks(state) {
+  const errors = [];
+  for (const lockPath of [...state.ownedLocks]) {
+    try {
+      if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+      state.ownedLocks.delete(lockPath);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) return errors[0];
+  if (errors.length > 1) return new AggregateError(errors, "Could not release core transaction locks.");
+  return null;
+}
+
+function combineErrors(errors, message) {
+  const present = errors.filter(Boolean);
+  if (present.length === 0) return null;
+  if (present.length === 1) return present[0];
+  return new AggregateError(present, message);
+}
+
+function acquireLocks(transaction, state) {
+  const lockPaths = getTransactionLockPaths(transaction);
   assertDistinctPaths([
     transaction.asarPath,
     transaction.exePath,
@@ -63,38 +126,53 @@ function assertSwapPathsAvailable(transaction) {
     transaction.stagedExePath,
     transaction.backupAsarPath,
     transaction.backupExePath,
-    ...swapPaths,
+    ...getTransactionSwapPaths(transaction),
+    ...lockPaths,
   ]);
-  for (const swapPath of swapPaths) {
+  for (const lockPath of lockPaths) {
+    try {
+      const descriptor = fs.openSync(lockPath, "wx");
+      fs.closeSync(descriptor);
+      state.ownedLocks.add(lockPath);
+    } catch (error) {
+      if (error?.code === "EEXIST") {
+        throw new Error(`Core transaction lock already held: ${lockPath}`);
+      }
+      throw error;
+    }
+  }
+}
+
+function assertSwapPathsAvailable(transaction) {
+  for (const swapPath of getTransactionSwapPaths(transaction)) {
     if (fs.existsSync(swapPath)) {
       throw new Error(`Core transaction swap path already exists: ${swapPath}`);
     }
   }
 }
 
-function replaceCoreFile(activePath, sourcePath) {
+function replaceCoreFile(activePath, sourcePath, state) {
   const { newPath, oldPath } = getSwapPaths(activePath);
-  fs.copyFileSync(sourcePath, newPath);
+  copyExclusive(sourcePath, newPath, state);
   fs.renameSync(activePath, oldPath);
+  state.ownedFiles.add(oldPath);
   fs.renameSync(newPath, activePath);
-  fs.unlinkSync(oldPath);
+  state.ownedFiles.delete(newPath);
+  unlinkOwnedPath(oldPath, state);
 }
 
-function cleanupOwnedSwapFiles(transaction) {
-  for (const swapPath of getTransactionSwapPaths(transaction)) {
-    if (fs.existsSync(swapPath)) fs.unlinkSync(swapPath);
+function resetOwnedSwapFileState(activePath, state) {
+  const { newPath, oldPath } = getSwapPaths(activePath);
+  unlinkOwnedPath(newPath, state);
+  if (!state.ownedFiles.has(oldPath)) return;
+  if (fs.existsSync(activePath)) unlinkOwnedPath(oldPath, state);
+  else {
+    fs.renameSync(oldPath, activePath);
+    state.ownedFiles.delete(oldPath);
   }
 }
 
-function resetOwnedSwapFileState(activePath) {
-  const { newPath, oldPath } = getSwapPaths(activePath);
-  if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
-  if (!fs.existsSync(oldPath)) return;
-  if (fs.existsSync(activePath)) fs.unlinkSync(oldPath);
-  else fs.renameSync(oldPath, activePath);
-}
-
-function restoreBackupPair(transaction) {
+function restoreBackupPair(transaction, state) {
   assertBackupPair(transaction.backupAsarPath, transaction.backupExePath, false);
   const errors = [];
   for (const [activePath, backupPath] of [
@@ -102,14 +180,39 @@ function restoreBackupPair(transaction) {
     [transaction.exePath, transaction.backupExePath],
   ]) {
     try {
-      resetOwnedSwapFileState(activePath);
-      replaceCoreFile(activePath, backupPath);
+      resetOwnedSwapFileState(activePath, state);
+      replaceCoreFile(activePath, backupPath, state);
     } catch (error) {
       errors.push(error);
     }
   }
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) throw new AggregateError(errors, "Could not restore the core backup pair.");
+}
+
+function prepareBackupPair(transaction) {
+  const state = createOperationState();
+  const [asarTempPath, exeTempPath] = getBackupTempPaths(transaction);
+  assertDistinctPaths([
+    transaction.asarPath,
+    transaction.exePath,
+    transaction.backupAsarPath,
+    transaction.backupExePath,
+    asarTempPath,
+    exeTempPath,
+  ]);
+  try {
+    copyExclusive(transaction.asarPath, asarTempPath, state);
+    copyExclusive(transaction.exePath, exeTempPath, state);
+    copyExclusive(asarTempPath, transaction.backupAsarPath, state);
+    unlinkOwnedPath(asarTempPath, state);
+    copyExclusive(exeTempPath, transaction.backupExePath, state);
+    unlinkOwnedPath(exeTempPath, state);
+  } catch (error) {
+    const cleanupError = cleanupOwnedFiles(state);
+    if (cleanupError) error.cleanupError = cleanupError;
+    throw error;
+  }
 }
 
 function validateTransaction(transaction) {
@@ -128,6 +231,13 @@ function validateTransaction(transaction) {
     throw new Error("Core transaction paths must be resolved absolute paths.");
   }
   assertDistinctPaths(paths);
+}
+
+function finishOperation(state, cleanOwnedFiles) {
+  return combineErrors(
+    [cleanOwnedFiles ? cleanupOwnedFiles(state) : null, releaseLocks(state)],
+    "Could not clean core transaction artifacts.",
+  );
 }
 
 export function prepareStagedCore({ asarPath, exePath, stageRoot, backupRoot }) {
@@ -154,8 +264,7 @@ export function prepareStagedCore({ asarPath, exePath, stageRoot, backupRoot }) 
   );
   if (!backupsExist) {
     fs.mkdirSync(resolvedBackupRoot, { recursive: true });
-    fs.copyFileSync(transaction.asarPath, transaction.backupAsarPath);
-    fs.copyFileSync(transaction.exePath, transaction.backupExePath);
+    prepareBackupPair(transaction);
   }
   fs.mkdirSync(resolvedStageRoot, { recursive: true });
   fs.copyFileSync(transaction.asarPath, transaction.stagedAsarPath);
@@ -168,28 +277,54 @@ export function activateStagedCore(transaction) {
   assertRegularFile(transaction.stagedAsarPath, "staged app.asar");
   assertRegularFile(transaction.stagedExePath, "staged executable");
   assertBackupPair(transaction.backupAsarPath, transaction.backupExePath, false);
-  assertSwapPathsAvailable(transaction);
+  const state = createOperationState();
+  let primaryError = null;
+  let recoveryCompleted = false;
+  let replacementStarted = false;
   try {
-    replaceCoreFile(transaction.asarPath, transaction.stagedAsarPath);
-    replaceCoreFile(transaction.exePath, transaction.stagedExePath);
+    acquireLocks(transaction, state);
+    assertSwapPathsAvailable(transaction);
+    replacementStarted = true;
+    replaceCoreFile(transaction.asarPath, transaction.stagedAsarPath, state);
+    replaceCoreFile(transaction.exePath, transaction.stagedExePath, state);
+    recoveryCompleted = true;
   } catch (error) {
-    try {
-      restoreBackupPair(transaction);
-    } catch (rollbackError) {
-      error.rollbackError = rollbackError;
+    primaryError = error;
+    if (replacementStarted) {
+      try {
+        restoreBackupPair(transaction, state);
+        recoveryCompleted = true;
+      } catch (rollbackError) {
+        primaryError.rollbackError = rollbackError;
+      }
     }
-    throw error;
-  } finally {
-    cleanupOwnedSwapFiles(transaction);
   }
+  const cleanupError = finishOperation(state, recoveryCompleted);
+  if (primaryError) {
+    if (cleanupError) primaryError.cleanupError = cleanupError;
+    throw primaryError;
+  }
+  if (cleanupError) throw cleanupError;
 }
 
 export function rollbackActivatedCore(transaction) {
   validateTransaction(transaction);
-  assertSwapPathsAvailable(transaction);
+  assertBackupPair(transaction.backupAsarPath, transaction.backupExePath, false);
+  const state = createOperationState();
+  let primaryError = null;
+  let recoveryCompleted = false;
   try {
-    restoreBackupPair(transaction);
-  } finally {
-    cleanupOwnedSwapFiles(transaction);
+    acquireLocks(transaction, state);
+    assertSwapPathsAvailable(transaction);
+    restoreBackupPair(transaction, state);
+    recoveryCompleted = true;
+  } catch (error) {
+    primaryError = error;
   }
+  const cleanupError = finishOperation(state, recoveryCompleted);
+  if (primaryError) {
+    if (cleanupError) primaryError.cleanupError = cleanupError;
+    throw primaryError;
+  }
+  if (cleanupError) throw cleanupError;
 }

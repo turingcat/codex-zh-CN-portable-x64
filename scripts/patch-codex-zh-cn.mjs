@@ -348,8 +348,8 @@ function syncExeAsarIntegrity(codexDir, asarPath) {
   );
 }
 
-function verifyPatchedAsar(asarPath) {
-  const result = spawnSync(process.execPath, [path.join(__dirname, "verify-patch.mjs"), asarPath], {
+function verifyPatchedAsar(asarPath, exePath) {
+  const result = spawnSync(process.execPath, [path.join(__dirname, "verify-patch.mjs"), asarPath, exePath], {
     encoding: "utf8",
   });
   if (result.status !== 0) {
@@ -1620,7 +1620,6 @@ function install(options) {
 
   const i18nGate = patchI18nGateInAsar(asarPath);
   logI18nGateReport(i18nGate);
-  syncExeAsarIntegrity(path.dirname(transaction.stagedExePath), asarPath);
 
   progressLog(6, INSTALL_STEP_TOTAL, "汉化 webview 与界面文案…");
   const webviewPatchCount = patchWebviewBundles(asarPath);
@@ -1628,7 +1627,8 @@ function install(options) {
     logOk(`已补丁 webview 文案 ${webviewPatchCount} 个文件`);
   }
 
-  verifyPatchedAsar(asarPath);
+  syncExeAsarIntegrity(path.dirname(transaction.stagedExePath), asarPath);
+  verifyPatchedAsar(asarPath, transaction.stagedExePath);
   activateStagedCore(transaction);
   logOk("已原子激活 app.asar 与 Codex 可执行文件。");
 

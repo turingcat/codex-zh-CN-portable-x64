@@ -115,6 +115,34 @@ test("verifier rejects a gate unless its fallback is already enabled", (t) => {
   assert.match(rejected.stderr, /\[X\] enable_i18n fallback: missing/);
 });
 
+test("verifier rejects a stale staged executable before active core files change", (t) => {
+  const staged = writeAsar([{ path: "webview/assets/a.js", content: 'a.get("enable_i18n",true)' }]);
+  const activeRoot = path.join(staged.root, "active");
+  const activeAsarPath = path.join(activeRoot, "resources", "app.asar");
+  const activeExePath = path.join(activeRoot, "Codex.exe");
+  const stagedExePath = path.join(staged.root, "Codex.exe");
+  fs.mkdirSync(path.dirname(activeAsarPath), { recursive: true });
+  fs.copyFileSync(staged.asarPath, activeAsarPath);
+  fs.writeFileSync(activeExePath, "active-executable");
+  fs.writeFileSync(
+    stagedExePath,
+    '{"file":"resources/app.asar","alg":"SHA256","value":"0000000000000000000000000000000000000000000000000000000000000000"}',
+  );
+  const beforeAsar = fs.readFileSync(activeAsarPath);
+  const beforeExe = fs.readFileSync(activeExePath);
+  t.after(() => fs.rmSync(staged.root, { recursive: true, force: true }));
+
+  const result = spawnSync(process.execPath, ["scripts/verify-patch.mjs", staged.asarPath, stagedExePath], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /EXE ASAR header hash/);
+  assert.deepEqual(fs.readFileSync(activeAsarPath), beforeAsar);
+  assert.deepEqual(fs.readFileSync(activeExePath), beforeExe);
+});
+
 test("status exposes stable i18n gate fields in JSON and human output", (t) => {
   const fixture = writeAsar([
     { path: "webview/assets/a.js", content: 'a.get("enable_i18n",false)' },

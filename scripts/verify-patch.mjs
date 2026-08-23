@@ -1,12 +1,32 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { inspectI18nGateInAsar } from "./patch-codex-zh-cn.mjs";
 
 const asarPath = process.argv[2] || "D:/soft/Codex-win-x64-26.519.81530/resources/app.asar";
+const exePath = process.argv[3];
 const asar = fs.readFileSync(asarPath);
 const hs = asar.readUInt32LE(4);
 const hp = asar.subarray(8, 8 + hs);
 const hss = hp.readInt32LE(4);
 const header = JSON.parse(hp.subarray(8, 8 + hss).toString("utf8"));
+const asarHeaderHash = crypto
+  .createHash("sha256")
+  .update(hp.subarray(8, 8 + hss))
+  .digest("hex");
+
+const EXE_ASAR_INTEGRITY_MARKERS = [
+  '{"file":"resources\\\\app.asar","alg":"SHA256","value":"',
+  '{"file":"resources\\/app.asar","alg":"SHA256","value":"',
+  '{"file":"resources/app.asar","alg":"SHA256","value":"',
+];
+
+function findExeAsarIntegrityOffset(exeText) {
+  for (const marker of EXE_ASAR_INTEGRITY_MARKERS) {
+    const markerOffset = exeText.indexOf(marker);
+    if (markerOffset >= 0) return markerOffset + marker.length;
+  }
+  return null;
+}
 
 function find(node, p = "") {
   if (node.files) {
@@ -49,4 +69,20 @@ if (i18nGate.status !== "already-enabled") {
   process.exitCode = 1;
 } else {
   console.log("[OK] enable_i18n fallback: enabled");
+}
+
+if (exePath) {
+  const exeText = fs.readFileSync(exePath).toString("latin1");
+  const hashOffset = findExeAsarIntegrityOffset(exeText);
+  if (hashOffset === null) {
+    console.log("[OK] EXE ASAR header hash: not embedded; skipped");
+  } else {
+    const exeHash = exeText.slice(hashOffset, hashOffset + 64);
+    if (exeHash !== asarHeaderHash) {
+      console.error(`[X] EXE ASAR header hash: ${exeHash} != ${asarHeaderHash}`);
+      process.exitCode = 1;
+    } else {
+      console.log("[OK] EXE ASAR header hash: matches staged app.asar");
+    }
+  }
 }
