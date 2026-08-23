@@ -357,7 +357,7 @@ function syncExeAsarIntegrity(codexDir, asarPath) {
   );
 }
 
-function verifyPatchedAsar(asarPath, exePath) {
+function verifyPatchedAsar(asarPath, exePath, { quiet = false } = {}) {
   const result = spawnSync(process.execPath, [path.join(__dirname, "verify-patch.mjs"), asarPath, exePath], {
     encoding: "utf8",
   });
@@ -365,7 +365,7 @@ function verifyPatchedAsar(asarPath, exePath) {
     const detail = (result.stderr || result.stdout || "").trim();
     throw new Error(`Staged app.asar semantic verification failed${detail ? `: ${detail}` : ""}`);
   }
-  if (result.stdout) process.stdout.write(result.stdout);
+  if (!quiet && result.stdout) process.stdout.write(result.stdout);
 }
 
 function resolveCodexInstallDir(dir) {
@@ -2078,7 +2078,211 @@ function getPluginLocalizationSummary(translations) {
   return { localized, total, details };
 }
 
+function buildManagedStatusReport(options, managed) {
+  const translations = loadJson("bundled-plugins-zh-CN.json");
+  const report = {
+    ok: false,
+    nodeVersion: process.version,
+    nodeOk: true,
+    runtime: { nodeVersion: process.version, trusted: true, healthy: true },
+    target: null,
+    targetHealthy: false,
+    managedState: false,
+    managedStateError: null,
+    mode: null,
+    sourceIdentity: null,
+    sourceCurrent: null,
+    stale: false,
+    codexPath: null,
+    codexFound: false,
+    codexRunning: isCodexRunning(),
+    asarPath: null,
+    exePath: null,
+    asarBackup: false,
+    asarLocalized: false,
+    i18nGateStatus: null,
+    i18nGateChanged: 0,
+    i18nGateRecognized: 0,
+    i18nGateAmbiguous: 0,
+    i18nGateFiles: [],
+    i18nGateEnabled: false,
+    exeBackup: false,
+    localeBackup: false,
+    localeRestorable: false,
+    executableIntegrity: false,
+    launcherPath: null,
+    launcherTarget: null,
+    launcherTargetContained: false,
+    launcherPathContained: false,
+    launcherAvailable: false,
+    rollbackAvailable: false,
+    localeOverride: getLocaleOverride(),
+    localeZhCn: false,
+    pluginsLocalized: 0,
+    pluginsTotal: 0,
+    pluginsHealthy: false,
+    plugins: [],
+    patchInstalled: false,
+    readyToInstall: true,
+    messages: [],
+  };
+
+  let state = null;
+  if (managed.state) {
+    try {
+      state = validateManagedStateBoundaries(managed.state);
+      report.managedState = true;
+      report.mode = state.mode;
+      report.sourceIdentity = state.sourceIdentity;
+    } catch (error) {
+      report.managedStateError = error.message;
+      report.readyToInstall = false;
+    }
+  } else if (managed.error) {
+    report.managedStateError = managed.error.message;
+    report.readyToInstall = false;
+  }
+
+  if (state) {
+    const app = state.patchedApp;
+    const resources = path.join(app, "resources");
+    const asarPath = path.join(resources, "app.asar");
+    const exePath = ["Codex.exe", "codex.exe"]
+      .map((name) => path.join(app, name))
+      .find((candidate) => fs.existsSync(candidate)) || null;
+    const appDirectory = fs.existsSync(app) && fs.statSync(app).isDirectory();
+    const asarFile = fs.existsSync(asarPath) && fs.statSync(asarPath).isFile();
+    const exeFile = Boolean(exePath && fs.statSync(exePath).isFile());
+
+    report.sourceCurrent =
+      state.mode === "store-copy"
+        ? options.storeSourceIdentity
+        : getSourceIdentity(state.sourceApp);
+    report.stale = compareSourceIdentity(state, report.sourceCurrent).stale;
+    report.codexPath = app;
+    report.codexFound = appDirectory;
+    report.asarPath = asarPath;
+    report.exePath = exePath;
+    report.targetHealthy = appDirectory && asarFile && exeFile;
+    report.target = {
+      mode: state.mode,
+      app,
+      resources,
+      asarPath,
+      exePath,
+      healthy: report.targetHealthy,
+    };
+
+    const managedRoot = getManagedPatchedRoot();
+    report.launcherTarget = app;
+    report.launcherTargetContained =
+      state.mode === "store-copy"
+        ? isManagedPathWithin(managedRoot, app) &&
+          (!fs.existsSync(app) || isExistingManagedPathWithin(managedRoot, app))
+        : sameManagedPath(app, state.sourceApp);
+    const { bat: launcherPath } = getInstallLauncherPaths();
+    report.launcherPath = launcherPath;
+    report.launcherAvailable =
+      fs.existsSync(launcherPath) && fs.statSync(launcherPath).isFile();
+    report.launcherPathContained =
+      report.launcherAvailable &&
+      isManagedPathWithin(projectRoot, launcherPath) &&
+      isExistingManagedPathWithin(projectRoot, launcherPath);
+
+    report.asarBackup = fs.existsSync(path.join(state.backupRoot, "app.asar"));
+    report.exeBackup =
+      fs.existsSync(path.join(state.backupRoot, "Codex.exe")) ||
+      fs.existsSync(path.join(state.backupRoot, "codex.exe"));
+    report.localeBackup = fs.existsSync(state.localeStatePath);
+    if (report.localeBackup) {
+      try {
+        readLocaleState(state.localeStatePath);
+        report.localeRestorable = true;
+      } catch {
+        report.localeRestorable = false;
+      }
+    }
+
+    if (asarFile) {
+      try {
+        report.asarLocalized = isAsarLocalized(asarPath);
+        const i18nGate = inspectI18nGateInAsar(asarPath);
+        report.i18nGateStatus = i18nGate.status;
+        report.i18nGateChanged = i18nGate.changedCount;
+        report.i18nGateRecognized = i18nGate.recognizedCount;
+        report.i18nGateAmbiguous = i18nGate.ambiguousCount;
+        report.i18nGateFiles = i18nGate.files;
+        report.i18nGateEnabled =
+          i18nGate.status === "already-enabled" &&
+          i18nGate.recognizedCount > 0 &&
+          i18nGate.ambiguousCount === 0 &&
+          i18nGate.files.length > 0;
+      } catch (error) {
+        report.messages.push(error.message);
+      }
+    }
+
+    if (report.targetHealthy) {
+      try {
+        verifyPatchedAsar(asarPath, exePath, { quiet: true });
+        report.executableIntegrity = true;
+      } catch (error) {
+        report.messages.push(error.message);
+      }
+    }
+
+    report.rollbackAvailable =
+      state.mode === "store-copy"
+        ? report.targetHealthy && report.localeRestorable
+        : report.asarBackup && report.exeBackup && report.localeRestorable;
+  }
+
+  report.localeZhCn = report.localeOverride === "zh-CN";
+  const pluginSummary = getPluginLocalizationSummary(translations);
+  report.pluginsLocalized = pluginSummary.localized;
+  report.pluginsTotal = pluginSummary.total;
+  report.plugins = pluginSummary.details;
+  report.pluginsHealthy =
+    report.pluginsTotal === 0 ||
+    report.pluginsLocalized === report.pluginsTotal;
+
+  const sourceHealthy =
+    state?.mode !== "store-copy" ||
+    Boolean(report.sourceCurrent && !report.stale);
+  report.patchInstalled = Boolean(
+    report.managedState &&
+      !report.managedStateError &&
+      sourceHealthy &&
+      report.targetHealthy &&
+      report.asarLocalized &&
+      report.i18nGateEnabled &&
+      report.executableIntegrity &&
+      report.localeZhCn &&
+      report.localeRestorable &&
+      report.pluginsHealthy &&
+      report.launcherAvailable &&
+      report.launcherTargetContained &&
+      report.launcherPathContained &&
+      report.rollbackAvailable,
+  );
+  report.ok = Boolean(report.runtime.healthy && report.patchInstalled);
+
+  if (report.stale) {
+    report.messages.push("Microsoft Store Codex 已更新或不可用，请重新安装汉化。");
+  } else if (report.ok) {
+    report.messages.push("当前判断：托管汉化完整且可恢复。");
+  } else if (report.managedState) {
+    report.messages.push("当前判断：托管汉化不完整，请重新安装或恢复。");
+  }
+  return report;
+}
+
 function buildStatusReport(options) {
+  const managedStatus = readManagedStateOrNull();
+  if (managedStatus.state || managedStatus.error) {
+    return buildManagedStatusReport(options, managedStatus);
+  }
+
   const translations = loadJson("bundled-plugins-zh-CN.json");
   const report = {
     ok: true,
@@ -2283,6 +2487,7 @@ function printStatusReport(report, asJson) {
 
   console.log("[env] nodeVersion=" + report.nodeVersion);
   console.log("[env] runtimeTrusted=" + report.runtime.trusted);
+  console.log("[env] runtimeHealthy=" + Boolean(report.runtime.healthy));
   console.log("[env] managedState=" + report.managedState);
   console.log("[env] managedStateError=" + (report.managedStateError || ""));
   console.log("[env] mode=" + (report.mode || ""));
@@ -2290,15 +2495,24 @@ function printStatusReport(report, asJson) {
   console.log("[env] sourceCurrent=" + (report.sourceCurrent || ""));
   console.log("[env] stale=" + report.stale);
   console.log("[env] launcherTarget=" + (report.launcherTarget || ""));
+  console.log("[env] launcherPath=" + (report.launcherPath || ""));
+  console.log("[env] launcherTargetContained=" + Boolean(report.launcherTargetContained));
+  console.log("[env] launcherPathContained=" + Boolean(report.launcherPathContained));
+  console.log("[env] launcherAvailable=" + Boolean(report.launcherAvailable));
   console.log("[env] codexFound=" + report.codexFound);
   console.log("[env] codexPath=" + (report.codexPath || ""));
+  console.log("[env] target=" + JSON.stringify(report.target));
+  console.log("[env] targetHealthy=" + Boolean(report.targetHealthy));
   console.log("[env] codexRunning=" + report.codexRunning);
+  console.log("[env] asarPath=" + (report.asarPath || ""));
+  console.log("[env] exePath=" + (report.exePath || ""));
   console.log("[env] asarLocalized=" + report.asarLocalized);
   console.log("[env] i18nGateStatus=" + (report.i18nGateStatus || ""));
   console.log("[env] i18nGateChanged=" + report.i18nGateChanged);
   console.log("[env] i18nGateRecognized=" + report.i18nGateRecognized);
   console.log("[env] i18nGateAmbiguous=" + report.i18nGateAmbiguous);
   console.log("[env] i18nGateFiles=" + JSON.stringify(report.i18nGateFiles));
+  console.log("[env] i18nGateEnabled=" + Boolean(report.i18nGateEnabled));
   console.log("[env] asarBackup=" + report.asarBackup);
   console.log("[env] exeBackup=" + report.exeBackup);
   console.log("[env] localeBackup=" + report.localeBackup);
@@ -2309,6 +2523,7 @@ function printStatusReport(report, asJson) {
   console.log("[env] localeZhCn=" + report.localeZhCn);
   console.log("[env] pluginsLocalized=" + report.pluginsLocalized);
   console.log("[env] pluginsTotal=" + report.pluginsTotal);
+  console.log("[env] pluginsHealthy=" + Boolean(report.pluginsHealthy));
   console.log("[env] patchInstalled=" + report.patchInstalled);
   console.log("[env] readyToInstall=" + report.readyToInstall);
   for (const message of report.messages) {
@@ -2337,8 +2552,11 @@ function parseArgs(argv) {
     if (argv[i] === "--codex-path" && argv[i + 1]) {
       codexPath = argv[i + 1];
       i += 1;
-    } else if (argv[i] === "--store-source-identity" && argv[i + 1]) {
-      storeSourceIdentity = argv[i + 1];
+    } else if (argv[i] === "--store-source-identity" && argv[i + 1] !== undefined) {
+      storeSourceIdentity =
+        argv[i + 1] === "__CODEX_STORE_IDENTITY_UNAVAILABLE__"
+          ? null
+          : argv[i + 1] || null;
       i += 1;
     } else if (argv[i] === "--json") {
       json = true;

@@ -111,13 +111,20 @@ function Get-StatusReport {
     }
 
     $argsList = @($patchScript, "status", "--json")
+    $storeSourceIdentity = "__CODEX_STORE_IDENTITY_UNAVAILABLE__"
+    $storePackage = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+    if ($storePackage -and $storePackage.InstallLocation) {
+        $storeSourceIdentity = Split-Path -Leaf $storePackage.InstallLocation
+    }
+    $argsList += @("--store-source-identity", $storeSourceIdentity)
     if ($CustomCodexPath) {
         $argsList += @("--codex-path", $CustomCodexPath)
     }
 
     $output = & $NodePath @argsList 2>&1
-    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 2) {
-        throw "环境检测失败，退出码 $LASTEXITCODE`n$output"
+    $statusExitCode = $LASTEXITCODE
+    if ($statusExitCode -ne 0 -and $statusExitCode -ne 2) {
+        throw "环境检测失败，退出码 $statusExitCode`n$output"
     }
 
     $jsonLine = ($output | Where-Object { $_ -match '^\{' } | Select-Object -Last 1)
@@ -125,7 +132,9 @@ function Get-StatusReport {
         throw "无法读取环境检测报告。`n$output"
     }
 
-    return ($jsonLine | ConvertFrom-Json)
+    $report = $jsonLine | ConvertFrom-Json
+    $report | Add-Member -NotePropertyName statusExitCode -NotePropertyValue $statusExitCode -Force
+    return $report
 }
 
 function Show-StatusReport {
@@ -142,13 +151,45 @@ function Show-StatusReport {
     } else {
         Write-WarnLine "未找到托管状态"
     }
+    Write-InfoLine "模式 / 目标: $($Report.mode) / $($Report.codexPath)"
+    Write-InfoLine "Store 源记录: $($Report.sourceIdentity)"
+    Write-InfoLine "Store 源当前: $($Report.sourceCurrent)"
     if ($Report.stale) {
-        Write-Bad "Store 源已更新或不可用，请重新运行 install-windows.bat"
-    } elseif ($Report.sourceCurrent) {
-        Write-InfoLine "Store 源身份: $($Report.sourceCurrent)"
+        Write-Bad "Store 源状态: stale（已更新或不可用，请重新运行 install-windows.bat）"
+    } else {
+        Write-Ok "Store 源状态: current"
     }
-    if ($Report.launcherTarget) {
-        Write-InfoLine "汉化启动目标: $($Report.launcherTarget)"
+
+    if ($Report.targetHealthy) {
+        Write-Ok "托管目标: healthy"
+    } else {
+        Write-Bad "托管目标: unhealthy"
+    }
+    Write-InfoLine "app.asar: $($Report.asarPath)"
+    Write-InfoLine "Codex EXE: $($Report.exePath)"
+
+    $gateCounts = "changed=$($Report.i18nGateChanged), recognized=$($Report.i18nGateRecognized), ambiguous=$($Report.i18nGateAmbiguous)"
+    if ($Report.i18nGateEnabled) {
+        Write-Ok "i18n gate: $($Report.i18nGateStatus) ($gateCounts)"
+    } else {
+        Write-Bad "i18n gate: $($Report.i18nGateStatus) ($gateCounts)"
+    }
+    foreach ($gateFile in $Report.i18nGateFiles) {
+        Write-InfoLine "i18n gate file: $($gateFile.path) [$($gateFile.status)]"
+    }
+
+    if ($Report.executableIntegrity) {
+        Write-Ok "EXE-ASAR 完整性: valid"
+    } else {
+        Write-Bad "EXE-ASAR 完整性: invalid"
+    }
+
+    Write-InfoLine "汉化启动器: $($Report.launcherPath)"
+    Write-InfoLine "汉化启动目标: $($Report.launcherTarget)"
+    if ($Report.launcherAvailable -and $Report.launcherTargetContained -and $Report.launcherPathContained) {
+        Write-Ok "启动器路径 / 目标包含关系: valid"
+    } else {
+        Write-Bad "启动器路径 / 目标包含关系: invalid"
     }
 
     if ($Report.nodeOk) {
@@ -180,9 +221,14 @@ function Show-StatusReport {
     } else {
         Write-WarnLine "语言配置: $($Report.localeOverride)"
     }
+    if ($Report.localeRestorable) {
+        Write-Ok "语言配置备份: valid / restorable"
+    } else {
+        Write-Bad "语言配置备份: invalid / not restorable"
+    }
 
     if ($Report.pluginsTotal -gt 0) {
-        if ($Report.pluginsLocalized -eq $Report.pluginsTotal) {
+        if ($Report.pluginsHealthy) {
             Write-Ok "内置插件 metadata: $($Report.pluginsLocalized)/$($Report.pluginsTotal)"
         } else {
             Write-WarnLine "内置插件 metadata: $($Report.pluginsLocalized)/$($Report.pluginsTotal)"
@@ -196,6 +242,12 @@ function Show-StatusReport {
         }
     } else {
         Write-WarnLine "尚未检测到内置插件缓存"
+    }
+
+    if ($Report.rollbackAvailable) {
+        Write-Ok "托管回滚: available"
+    } else {
+        Write-Bad "托管回滚: unavailable"
     }
 
     if ($Report.asarBackup) {
@@ -252,6 +304,14 @@ function Invoke-PatchAction {
         throw "操作失败，退出码 $LASTEXITCODE"
     }
 
+    if ($PatchAction -eq "install") {
+        $installedReport = Get-StatusReport -CustomCodexPath $CustomCodexPath
+        Show-StatusReport -Report $installedReport
+        if ([int]$installedReport.statusExitCode -ne 0 -or -not $installedReport.ok) {
+            throw "安装后的托管状态验证失败，退出码 $($installedReport.statusExitCode)"
+        }
+    }
+
     if ($PatchAction -eq "install" -and $LaunchCodex) {
         $launched = $false
         foreach ($line in $patchLines) {
@@ -271,17 +331,19 @@ function Invoke-VerifyPatch {
     param([string]$CustomCodexPath = "")
 
     $report = Get-StatusReport -CustomCodexPath $CustomCodexPath
-    if (-not $report.codexFound) {
-        throw "未找到 Codex，无法验证补丁。"
+    Show-StatusReport -Report $report
+    if ([int]$report.statusExitCode -ne 0 -or -not $report.ok) {
+        throw "托管状态验证失败，退出码 $($report.statusExitCode)"
     }
 
     $asarPath = $report.asarPath
-    if (-not $asarPath) {
-        throw "未找到 app.asar 路径。"
+    $exePath = $report.exePath
+    if (-not $asarPath -or -not $exePath) {
+        throw "未找到托管 app.asar / Codex.exe 路径。"
     }
 
     Write-Step "【验证补丁】"
-    & $NodePath $verifyScript $report.asarPath
+    & $NodePath $verifyScript $asarPath $exePath
     if ($LASTEXITCODE -ne 0) {
         throw "验证脚本执行失败，退出码 $LASTEXITCODE"
     }
@@ -467,6 +529,7 @@ switch ($Action) {
     "status" {
         $report = Get-StatusReport -CustomCodexPath $CodexPath
         Show-StatusReport -Report $report
+        exit ([int]$report.statusExitCode)
     }
     "verify" {
         Invoke-VerifyPatch -CustomCodexPath $CodexPath

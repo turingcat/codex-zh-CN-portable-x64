@@ -640,3 +640,168 @@ test("status marks Store state stale when no current package can be located", (t
   assert.equal(report.sourceCurrent, null);
   assert.equal(report.stale, true);
 });
+
+test("status inspects the active managed Store ASAR and executable pair", (t) => {
+  const fixture = createInstallPublicationFixture(t, "store-copy");
+  fs.rmdirSync(fixture.statePath);
+
+  const installed = spawnSync(
+    process.execPath,
+    [
+      path.join(fixture.projectRoot, "scripts", "patch-codex-zh-cn.mjs"),
+      "install",
+      "--codex-path",
+      fixture.sourceApp,
+      "--no-relaunch",
+    ],
+    {
+      cwd: fixture.projectRoot,
+      encoding: "utf8",
+      env: { ...process.env, HOME: fixture.home },
+    },
+  );
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout);
+
+  const state = readManagedState(fixture.statePath);
+  const managedAsarPath = path.join(state.patchedApp, "resources", "app.asar");
+  fs.appendFileSync(
+    managedAsarPath,
+    'label:`文件`;关于 ${n.app.getName()};{label:`编辑`,id:x;label:`撤销`;label:`最小化`',
+    "utf8",
+  );
+  fs.writeFileSync(
+    fixture.configPath,
+    '[desktop]\nlocaleOverride = "zh-CN"\n',
+    "utf8",
+  );
+  fs.writeFileSync(fixture.asarPath, "broken source ASAR", "utf8");
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(fixture.projectRoot, "scripts", "patch-codex-zh-cn.mjs"),
+      "status",
+      "--codex-path",
+      fixture.sourceApp,
+      "--store-source-identity",
+      state.sourceIdentity,
+      "--json",
+    ],
+    {
+      cwd: fixture.projectRoot,
+      encoding: "utf8",
+      env: { ...process.env, HOME: fixture.home },
+    },
+  );
+  const report = JSON.parse(result.stdout);
+  const managedExePath = path.join(state.patchedApp, "Codex.exe");
+
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.equal(report.ok, true);
+  assert.equal(report.sourceCurrent, state.sourceIdentity);
+  assert.equal(report.stale, false);
+  assert.equal(report.codexPath, state.patchedApp);
+  assert.equal(report.asarPath, managedAsarPath);
+  assert.equal(report.exePath, managedExePath);
+  assert.deepEqual(report.target, {
+    mode: "store-copy",
+    app: state.patchedApp,
+    resources: path.join(state.patchedApp, "resources"),
+    asarPath: managedAsarPath,
+    exePath: managedExePath,
+    healthy: true,
+  });
+  assert.equal(report.targetHealthy, true);
+  assert.equal(report.i18nGateEnabled, true);
+  assert.equal(report.executableIntegrity, true);
+  assert.equal(report.localeZhCn, true);
+  assert.equal(report.localeRestorable, true);
+  assert.equal(report.pluginsHealthy, true);
+  assert.equal(report.launcherTarget, state.patchedApp);
+  assert.equal(report.launcherTargetContained, true);
+  assert.equal(report.launcherPathContained, true);
+  assert.equal(report.launcherAvailable, true);
+  assert.equal(report.rollbackAvailable, true);
+});
+
+test("status maps an unavailable Store identity to stale and exit code two", (t) => {
+  const fixture = createManagedFixture(t, "OpenAI.Codex_previous");
+  fs.mkdirSync(fixture.patchedApp, { recursive: true });
+  writeManagedState(fixture.statePath, {
+    version: 1,
+    patchVersion: "0.1.0",
+    mode: "store-copy",
+    sourceApp: fixture.sourceApp,
+    sourceIdentity: "OpenAI.Codex_previous",
+    patchedApp: fixture.patchedApp,
+    backupRoot: fixture.backupRoot,
+    localeStatePath: path.join(fixture.backupRoot, "locale-state.json"),
+  });
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      "scripts/patch-codex-zh-cn.mjs",
+      "status",
+      "--store-source-identity",
+      "__CODEX_STORE_IDENTITY_UNAVAILABLE__",
+      "--json",
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { ...process.env, HOME: fixture.home },
+    },
+  );
+  const report = JSON.parse(result.stdout);
+
+  assert.equal(result.status, 2);
+  assert.equal(report.sourceCurrent, null);
+  assert.equal(report.stale, true);
+  assert.equal(report.ok, false);
+});
+
+test("status exits two when the managed Store target loses its executable", (t) => {
+  const fixture = createInstallPublicationFixture(t, "store-copy");
+  fs.rmdirSync(fixture.statePath);
+  const installed = spawnSync(
+    process.execPath,
+    [
+      path.join(fixture.projectRoot, "scripts", "patch-codex-zh-cn.mjs"),
+      "install",
+      "--codex-path",
+      fixture.sourceApp,
+      "--no-relaunch",
+    ],
+    {
+      cwd: fixture.projectRoot,
+      encoding: "utf8",
+      env: { ...process.env, HOME: fixture.home },
+    },
+  );
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout);
+
+  const state = readManagedState(fixture.statePath);
+  fs.unlinkSync(path.join(state.patchedApp, "Codex.exe"));
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(fixture.projectRoot, "scripts", "patch-codex-zh-cn.mjs"),
+      "status",
+      "--store-source-identity",
+      state.sourceIdentity,
+      "--json",
+    ],
+    {
+      cwd: fixture.projectRoot,
+      encoding: "utf8",
+      env: { ...process.env, HOME: fixture.home },
+    },
+  );
+  const report = JSON.parse(result.stdout);
+
+  assert.equal(result.status, 2);
+  assert.equal(report.ok, false);
+  assert.equal(report.targetHealthy, false);
+  assert.equal(report.executableIntegrity, false);
+  assert.equal(report.asarPath, path.join(state.patchedApp, "resources", "app.asar"));
+});
