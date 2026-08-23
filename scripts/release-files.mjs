@@ -26,6 +26,35 @@ function isExcluded(relativePath) {
   return EXCLUDED_PREFIXES.some((prefix) => relativePath.startsWith(prefix));
 }
 
+function assertSafeReleasePath(root, filePath, relativePath) {
+  const item = fs.lstatSync(filePath);
+  if (item.isSymbolicLink()) {
+    throw new Error(`Release input must not contain symbolic links or reparse points: ${relativePath}`);
+  }
+
+  const realPath = fs.realpathSync(filePath);
+  const relativeRealPath = path.relative(root, realPath);
+  if (
+    relativeRealPath === ".." ||
+    relativeRealPath.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeRealPath)
+  ) {
+    throw new Error(`Release input resolves outside project root: ${relativePath}`);
+  }
+  return item;
+}
+
+function safeReleasePathIfPresent(root, filePath, relativePath) {
+  try {
+    return assertSafeReleasePath(root, filePath, relativePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 function walk(root, directory, output) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const filePath = path.join(directory, entry.name);
@@ -33,30 +62,32 @@ function walk(root, directory, output) {
     if (isExcluded(`${relativePath}${entry.isDirectory() ? "/" : ""}`) || entry.name === ".DS_Store") {
       continue;
     }
-    if (entry.isSymbolicLink()) {
-      throw new Error(`Release input must not contain symbolic links: ${relativePath}`);
-    }
-    if (entry.isDirectory()) {
+
+    const item = assertSafeReleasePath(root, filePath, relativePath);
+    if (item.isDirectory()) {
       walk(root, filePath, output);
-    } else if (entry.isFile()) {
+    } else if (item.isFile()) {
       output.push(relativePath);
     }
   }
 }
 
 export function collectReleaseFiles(rootPath) {
-  const root = path.resolve(rootPath);
+  const root = fs.realpathSync(path.resolve(rootPath));
   const files = [];
 
   for (const relativePath of ROOT_FILES) {
     const filePath = path.join(root, relativePath);
-    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+    const item = safeReleasePathIfPresent(root, filePath, relativePath);
+    if (item?.isFile()) {
       files.push(relativePath);
     }
   }
+
   for (const relativePath of ROOT_DIRECTORIES) {
     const directory = path.join(root, relativePath);
-    if (fs.existsSync(directory) && fs.statSync(directory).isDirectory()) {
+    const item = safeReleasePathIfPresent(root, directory, relativePath);
+    if (item?.isDirectory()) {
       walk(root, directory, files);
     }
   }

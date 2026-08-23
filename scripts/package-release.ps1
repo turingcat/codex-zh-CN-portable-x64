@@ -7,6 +7,39 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 . (Join-Path $Root "scripts\runtime-contract.ps1")
 
+function Assert-NoReparsePointInPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RootPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CandidatePath
+    )
+
+    $rootFull = [System.IO.Path]::GetFullPath($RootPath).TrimEnd([char]'\')
+    $rootPrefix = $rootFull + '\'
+    $candidateFull = [System.IO.Path]::GetFullPath($CandidatePath)
+    if (-not $candidateFull.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Release path escaped project root: $CandidatePath"
+    }
+
+    $current = $candidateFull
+    while ($true) {
+        $item = Get-Item -LiteralPath $current -Force
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "Release input path contains a reparse point: $CandidatePath"
+        }
+        if ($current.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrEmpty($parent) -or $parent.Equals($current, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Release path escaped project root: $CandidatePath"
+        }
+        $current = $parent
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $packageJson = Get-Content -LiteralPath (Join-Path $Root "package.json") -Raw -Encoding UTF8 | ConvertFrom-Json
     $Version = [string]$packageJson.version
@@ -62,6 +95,7 @@ try {
         if (-not (Test-Path -LiteralPath $targetDirectory -PathType Container)) {
             New-Item -ItemType Directory -Path $targetDirectory -Force | Out-Null
         }
+        Assert-NoReparsePointInPath -RootPath $Root -CandidatePath $source
         Copy-Item -LiteralPath $source -Destination $target
     }
 

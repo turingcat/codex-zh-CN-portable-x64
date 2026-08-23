@@ -508,7 +508,7 @@ if (-not (Test-Path $patchScript)) {
     throw "缺少补丁脚本: $patchScript"
 }
 
-if ($Action -eq "test-fixture" -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne "1") {
+if ($Action -in @("test", "test-fixture") -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne "1") {
     throw "Test actions are disabled outside the smoke harness."
 }
 

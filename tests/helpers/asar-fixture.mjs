@@ -87,6 +87,44 @@ function relativeFixturePath(root, filePath) {
   return path.relative(root, filePath).split(path.sep).join("/");
 }
 
+function isPathInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function assertSafeFixtureTarget(rootPath, targetPath) {
+  const root = path.resolve(rootPath);
+  const target = path.resolve(targetPath);
+  if (!isPathInside(root, target)) {
+    throw new Error(`Fixture target resolves outside fixture root: ${targetPath}`);
+  }
+
+  const rootItem = fs.lstatSync(root);
+  if (rootItem.isSymbolicLink()) {
+    throw new Error(`Fixture root must not be a symbolic link or reparse point: ${root}`);
+  }
+  const realRoot = fs.realpathSync(root);
+  let current = root;
+  for (const part of path.relative(root, target).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    let item;
+    try {
+      item = fs.lstatSync(current);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        break;
+      }
+      throw error;
+    }
+    if (item.isSymbolicLink()) {
+      throw new Error(`Fixture path must not contain a symbolic link or reparse point: ${current}`);
+    }
+    if (!isPathInside(realRoot, fs.realpathSync(current))) {
+      throw new Error(`Fixture path resolves outside fixture root: ${current}`);
+    }
+  }
+}
+
 export function createCodexFixture({ appPath, homePath, manifestPath }) {
   const root = path.dirname(appPath);
   const asarPath = path.join(appPath, "resources", "app.asar");
@@ -103,6 +141,10 @@ export function createCodexFixture({ appPath, homePath, manifestPath }) {
     ".codex-plugin",
     "plugin.json",
   );
+
+  for (const targetPath of [asarPath, exePath, configPath, pluginPath, manifestPath]) {
+    assertSafeFixtureTarget(root, targetPath);
+  }
 
   const asarHeaderHash = writeAsarFixture(asarPath);
   const exe = Buffer.from(

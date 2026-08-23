@@ -13,7 +13,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $installerPath = Join-Path $PSScriptRoot "install_windows.ps1"
 . (Join-Path $PSScriptRoot "runtime-contract.ps1")
 
-if ($Action -eq "test-fixture" -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne "1") {
+if ($Action -in @("test", "test-fixture") -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne "1") {
     throw "Test actions are disabled outside the smoke harness."
 }
 

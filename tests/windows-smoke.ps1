@@ -2,6 +2,41 @@ param()
 
 $ErrorActionPreference = "Stop"
 
+function Assert-SafeSmokeFixtureTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FixturePath
+    )
+
+    $fixtureFull = [System.IO.Path]::GetFullPath($FixturePath)
+    $tempPrefix = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char]'\') + '\'
+    if (-not $fixtureFull.StartsWith($tempPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not (Split-Path -Leaf $fixtureFull).StartsWith("codex-zh-cn-smoke-", [System.StringComparison]::Ordinal)) {
+        throw "Smoke fixture path must be a unique codex-zh-cn-smoke-* directory under TEMP."
+    }
+
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($fixtureFull)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $item = Get-Item -LiteralPath $current -Force
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "Smoke fixture tree contains a reparse point: $current"
+        }
+        if (-not $item.PSIsContainer) {
+            continue
+        }
+        foreach ($child in Get-ChildItem -LiteralPath $current -Force) {
+            if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                throw "Smoke fixture tree contains a reparse point: $($child.FullName)"
+            }
+            if ($child.PSIsContainer) {
+                $pending.Push($child.FullName)
+            }
+        }
+    }
+}
+
 if ($env:CODEX_ZH_CN_TEST_FIXTURE -ne "1") {
     throw "Windows fixture smoke requires CODEX_ZH_CN_TEST_FIXTURE=1."
 }
@@ -47,6 +82,7 @@ try {
     }
 } finally {
     if (Test-Path -LiteralPath $fixture) {
+        Assert-SafeSmokeFixtureTree -FixturePath $fixture
         Remove-Item -LiteralPath $fixture -Recurse -Force
     }
 }

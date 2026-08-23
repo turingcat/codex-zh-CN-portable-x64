@@ -4,15 +4,14 @@ import test from "node:test";
 
 const read = (file) => fs.readFileSync(file, "utf8");
 
-test("keeps fixture mode gated and runs build, install, status, and restore with bundled Node", () => {
+test("keeps both test actions gated and runs fixture install, status, and restore with bundled Node", () => {
   const bootstrap = read("scripts/bootstrap_windows.ps1");
   const installer = read("scripts/install_windows.ps1");
 
   assert.match(
     bootstrap,
-    /if \(\$Action -eq "test-fixture" -and \$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"\)/,
+    /if \(\$Action -in @\("test", "test-fixture"\) -and \$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"\)/,
   );
-  assert.doesNotMatch(bootstrap, /\$Action -eq "test" -or \$Action -eq "test-fixture"/);
   assert.match(bootstrap, /tests\\helpers\\asar-fixture\.mjs/);
   assert.match(bootstrap, /& \$nodePath \$fixtureBuilder/);
   assert.match(installer, /"test-fixture" \{[\s\S]*?"install"[\s\S]*?--no-relaunch/);
@@ -38,7 +37,7 @@ test("fixture bootstrap uses an explicit path-separator char", () => {
   assert.match(bootstrap, /TrimEnd\(\[char\]'\\'\)/);
 });
 
-test("Windows CI uses bundled runtime and scopes fixture permission to the smoke step", () => {
+test("Windows CI uses bundled runtime and scopes test permission to each test step", () => {
   const workflowPath = ".github/workflows/windows-smoke.yml";
   assert.equal(fs.existsSync(workflowPath), true, `${workflowPath} must exist`);
   const workflow = read(workflowPath);
@@ -47,9 +46,13 @@ test("Windows CI uses bundled runtime and scopes fixture permission to the smoke
   assert.match(workflow, /bootstrap_windows\.ps1 -Action test -NoPause/);
   assert.match(
     workflow,
+    /- name: Node tests with bundled runtime[\s\S]*?env:\s*\n\s+CODEX_ZH_CN_TEST_FIXTURE: "1"[\s\S]*?-Action test/,
+  );
+  assert.match(
+    workflow,
     /- name: Windows fixture smoke[\s\S]*?env:\s*\n\s+CODEX_ZH_CN_TEST_FIXTURE: "1"[\s\S]*?run: \.\\tests\\windows-smoke\.ps1/,
   );
-  assert.equal((workflow.match(/CODEX_ZH_CN_TEST_FIXTURE/g) ?? []).length, 1);
+  assert.equal((workflow.match(/CODEX_ZH_CN_TEST_FIXTURE/g) ?? []).length, 2);
   assert.doesNotMatch(
     workflow,
     /actions\/setup-node|npm\s+(?:ci|install)|Invoke-WebRequest|Start-BitsTransfer|curl\b/,
