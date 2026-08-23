@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("install", "uninstall", "status", "verify", "menu", "restore", "test-fixture")]
+    [ValidateSet("install", "uninstall", "status", "verify", "menu", "restore", "test", "test-fixture")]
     [string]$Action = "menu",
     [string]$CodexPath = "",
 
@@ -16,6 +16,7 @@ $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyI
 $projectRoot = Split-Path -Parent $scriptDir
 $patchScript = Join-Path $scriptDir "patch-codex-zh-cn.mjs"
 $verifyScript = Join-Path $scriptDir "verify-patch.mjs"
+. (Join-Path $scriptDir "runtime-contract.ps1")
 
 function Write-Title {
     Write-Host ""
@@ -49,14 +50,6 @@ function Test-NodeAvailable {
     return Test-Path -LiteralPath $NodePath -PathType Leaf
 }
 
-function ConvertTo-NativeArgument {
-    param([string]$Value)
-
-    $escapedValue = [regex]::Replace($Value, '(\\*)"', '$1$1\\"')
-    $escapedValue = [regex]::Replace($escapedValue, '(\\*)$', '$1$1')
-    return '"' + $escapedValue + '"'
-}
-
 function Test-IsAdministrator {
     $principal = New-Object Security.Principal.WindowsPrincipal(
         [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -65,34 +58,46 @@ function Test-IsAdministrator {
 }
 
 function Invoke-ElevatedInstaller {
-    param(
-        [string[]]$ExtraArgs = @()
-    )
+    $elevatedHost = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path -LiteralPath $elevatedHost -PathType Leaf)) {
+        throw "Unable to locate the Windows PowerShell host: $elevatedHost"
+    }
 
-    $psArgs = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", "`"$PSCommandPath`""
-    ) + $ExtraArgs
+    $commandParts = @(
+        "& " + (ConvertTo-SingleQuotedPowerShellLiteral $PSCommandPath),
+        "-Action " + (ConvertTo-SingleQuotedPowerShellLiteral $Action),
+        "-NodePath " + (ConvertTo-SingleQuotedPowerShellLiteral $NodePath)
+    )
+    if ($CodexPath) {
+        $commandParts += "-CodexPath " + (ConvertTo-SingleQuotedPowerShellLiteral $CodexPath)
+    }
+    if ($NoPause) {
+        $commandParts += "-NoPause"
+    }
+    $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes(($commandParts -join " ")))
 
     Write-Host ""
     Write-Host "  需要管理员权限，正在请求 UAC 提升..." -ForegroundColor Yellow
     Write-Host "  请在弹窗中点击「是」。" -ForegroundColor DarkGray
     Write-Host ""
 
-    Start-Process -FilePath "powershell.exe" `
-        -Verb RunAs `
-        -WorkingDirectory $projectRoot `
-        -ArgumentList $psArgs
-    exit 0
+    try {
+        $process = Start-Process -FilePath $elevatedHost `
+            -Verb RunAs `
+            -WorkingDirectory $projectRoot `
+            -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedCommand) `
+            -Wait -PassThru `
+            -ErrorAction Stop
+    } catch {
+        throw "Unable to start the elevated installer: $($_.Exception.Message)"
+    }
+
+    return [int]$process.ExitCode
 }
 
 function Ensure-Administrator {
-    if (Test-IsAdministrator) { return }
-    $extra = @("-Action", $Action, "-NodePath", (ConvertTo-NativeArgument $NodePath))
-    if ($CodexPath) { $extra += @("-CodexPath", (ConvertTo-NativeArgument $CodexPath)) }
-    if ($NoPause) { $extra += "-NoPause" }
-    Invoke-ElevatedInstaller -ExtraArgs $extra
+    if (Test-IsAdministrator) { return $null }
+    return Invoke-ElevatedInstaller
 }
 
 function Get-StatusReport {
@@ -423,14 +428,23 @@ if (-not (Test-Path $patchScript)) {
     throw "缺少补丁脚本: $patchScript"
 }
 
-if ($Interactive -or $Action -eq "menu") {
-    Ensure-Administrator
-    Start-InteractiveMenu
-    exit 0
+if (($Action -eq "test" -or $Action -eq "test-fixture") -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne "1") {
+    throw "Test actions are disabled outside the smoke harness."
 }
 
-if ($Action -in @("install", "uninstall", "restore", "verify")) {
-    Ensure-Administrator
+if ($Interactive -or $Action -in @("menu", "install", "uninstall", "restore", "verify")) {
+    $elevatedExitCode = Ensure-Administrator
+    if ($null -ne $elevatedExitCode) {
+        exit $elevatedExitCode
+    }
+}
+
+$runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot
+$NodePath = Assert-VerifiedBundledNode -Runtime $runtime -NodePath $NodePath
+
+if ($Interactive -or $Action -eq "menu") {
+    Start-InteractiveMenu
+    exit 0
 }
 
 switch ($Action) {
@@ -452,6 +466,11 @@ switch ($Action) {
     "restore" {
         Write-Step "【恢复英文 / 重置】"
         Invoke-PatchAction -PatchAction "uninstall" -CustomCodexPath $CodexPath
+    }
+    "test" {
+        $tests = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot "tests") -Filter "*.test.mjs" | ForEach-Object { $_.FullName })
+        & $NodePath --test @tests
+        exit $LASTEXITCODE
     }
     "test-fixture" {
         Write-InfoLine "Smoke harness fixture action accepted."

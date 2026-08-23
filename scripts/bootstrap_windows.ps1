@@ -10,49 +10,22 @@ param(
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$runtimeRoot = Join-Path $projectRoot "runtime"
-$manifestPath = Join-Path $runtimeRoot "runtime.json"
-$expandedRoot = Join-Path $runtimeRoot "expanded"
 $installerPath = Join-Path $PSScriptRoot "install_windows.ps1"
-
-if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
-    throw "This bundle requires an AMD64 Windows environment."
-}
+. (Join-Path $PSScriptRoot "runtime-contract.ps1")
 
 if (($Action -eq "test" -or $Action -eq "test-fixture") -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne "1") {
     throw "Test actions are disabled outside the smoke harness."
 }
 
-if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-    throw "Bundled runtime manifest is missing: $manifestPath"
-}
-
-$manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$archivePath = Join-Path $runtimeRoot $manifest.archive
-$nodePath = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $expandedRoot $manifest.extractedDirectory) $manifest.executable))
+$runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot
+$nodePath = $runtime.NodePath
 
 if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) {
-    if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
-        throw "Bundled runtime archive is missing: $archivePath"
-    }
-
-    $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne $manifest.sha256) {
-        throw "Bundled Node.js checksum mismatch."
-    }
-
-    New-Item -ItemType Directory -Path $expandedRoot -Force | Out-Null
-    Expand-Archive -LiteralPath $archivePath -DestinationPath $expandedRoot -Force
+    New-Item -ItemType Directory -Path (Join-Path $projectRoot "runtime\expanded") -Force | Out-Null
+    Expand-Archive -LiteralPath $runtime.ArchivePath -DestinationPath (Join-Path $projectRoot "runtime\expanded") -Force
 }
 
-if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) {
-    throw "Bundled Node.js executable is missing after expansion: $nodePath"
-}
-
-$version = (& $nodePath --version).Trim()
-if ($version -ne $manifest.version) {
-    throw "Bundled Node.js version mismatch: $version"
-}
+$nodePath = Assert-VerifiedBundledNode -Runtime $runtime -NodePath $nodePath
 
 if ($Action -eq "test") {
     $tests = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot "tests") -Filter "*.test.mjs" | ForEach-Object { $_.FullName })

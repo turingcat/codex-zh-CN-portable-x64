@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 const read = (file) => fs.readFileSync(file, "utf8");
@@ -17,24 +19,112 @@ test("pins the official x64 Node runtime and local bootstrap contract", () => {
   });
 
   const bootstrap = read("scripts/bootstrap_windows.ps1");
-  assert.match(bootstrap, /Get-FileHash/);
-  assert.match(bootstrap, /PROCESSOR_ARCHITECTURE/);
+  const runtimeContract = read("scripts/runtime-contract.ps1");
+  assert.match(runtimeContract, /Get-FileHash/);
+  assert.match(runtimeContract, /GetNativeSystemInfo/);
   assert.match(bootstrap, /Expand-Archive/);
-  assert.match(bootstrap, /& \$nodePath --version/);
+  assert.match(runtimeContract, /& \$NodePath --version/);
   assert.match(bootstrap, /"-NodePath", \$nodePath/);
-  assert.doesNotMatch(bootstrap, /Invoke-WebRequest|Start-BitsTransfer/);
+  assert.doesNotMatch(`${bootstrap}\n${runtimeContract}`, /Invoke-WebRequest|Start-BitsTransfer/);
 });
 
 test("passes only the verified absolute bundled Node path to the installer", () => {
   const installer = read("scripts/install_windows.ps1");
 
   assert.match(installer, /\[Parameter\(Mandatory = \$true\)\]\s*\[string\]\$NodePath/);
-  assert.match(installer, /Test-Path -LiteralPath \$NodePath -PathType Leaf/);
-  assert.match(installer, /function ConvertTo-NativeArgument/);
-  assert.match(installer, /"-NodePath", \(ConvertTo-NativeArgument \$NodePath\)/);
+  assert.match(installer, /Get-VerifiedRuntime/);
+  assert.match(installer, /Assert-VerifiedBundledNode/);
   assert.match(installer, /& \$NodePath @argsList/);
   assert.doesNotMatch(installer, /Get-Command node/);
   assert.doesNotMatch(installer, /& node\b/);
+});
+
+test("verifies the archive before trusting cached Node and anchors cache bytes to its ZIP entry", () => {
+  const bootstrap = read("scripts/bootstrap_windows.ps1");
+  const runtimeContract = read("scripts/runtime-contract.ps1");
+
+  assert.match(bootstrap, /Get-VerifiedRuntime -ProjectRoot \$projectRoot/);
+  assert.ok(
+    bootstrap.indexOf("Get-VerifiedRuntime -ProjectRoot $projectRoot")
+      < bootstrap.indexOf("if (-not (Test-Path -LiteralPath $nodePath"),
+  );
+  assert.match(runtimeContract, /Get-FileHash -LiteralPath \$archivePath -Algorithm SHA256/);
+  assert.match(runtimeContract, /\[System\.IO\.Compression\.ZipFile\]::OpenRead/);
+  assert.match(runtimeContract, /Get-ArchiveEntrySha256/);
+  assert.match(runtimeContract, /Get-FileHash -LiteralPath \$NodePath -Algorithm SHA256/);
+  assert.match(runtimeContract, /NodePath does not match the expected bundled runtime path/);
+  assert.match(runtimeContract, /Bundled Node\.js executable hash does not match the verified archive entry/);
+});
+
+test("uses native Windows platform checks and an absolute encoded UAC relaunch", () => {
+  const installer = read("scripts/install_windows.ps1");
+  const runtimeContract = read("scripts/runtime-contract.ps1");
+
+  assert.match(runtimeContract, /GetNativeSystemInfo/);
+  assert.match(runtimeContract, /RtlGetVersion/);
+  assert.match(runtimeContract, /wProcessorArchitecture -ne 9/);
+  assert.match(runtimeContract, /InstallationType -ne "Client"/);
+  assert.match(runtimeContract, /dwMajorVersion -ne 10/);
+  assert.match(runtimeContract, /dwBuildNumber -lt 10240/);
+  assert.match(installer, /Join-Path \$env:SystemRoot "System32\\WindowsPowerShell\\v1\.0\\powershell\.exe"/);
+  assert.match(installer, /Test-Path -LiteralPath \$elevatedHost -PathType Leaf/);
+  assert.match(installer, /-EncodedCommand/);
+  assert.match(installer, /\[System\.Text\.Encoding\]::Unicode\.GetBytes/);
+  assert.match(runtimeContract, /function ConvertTo-SingleQuotedPowerShellLiteral/);
+  assert.match(runtimeContract, /\.Replace\("'", "''"\)/);
+  assert.match(installer, /-Wait -PassThru/);
+  assert.match(installer, /return \[int\]\$process\.ExitCode/);
+  assert.doesNotMatch(installer, /ConvertTo-NativeArgument/);
+  assert.doesNotMatch(installer, /-FilePath "powershell\.exe"/);
+});
+
+test("encodes hostile UAC values as one PowerShell literal when Windows PowerShell is available", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows PowerShell is unavailable on this host");
+    return;
+  }
+
+  const helperPath = path.join(process.cwd(), "scripts", "runtime-contract.ps1").replaceAll("'", "''");
+  const values = [
+    "C:\\bundle root\\node.exe",
+    "C:\\bundle\\O'Hara\\node.exe",
+    "C:\\bundle\\trailing\\",
+    "C:\\bundle\\semi;colon\\node.exe",
+  ];
+
+  for (const value of values) {
+    const valueBase64 = Buffer.from(value, "utf8").toString("base64");
+    const command = [
+      `$value = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${valueBase64}'))`,
+      `. '${helperPath}'`,
+      "ConvertTo-SingleQuotedPowerShellLiteral $value",
+    ].join("; ");
+    const encodedCommand = Buffer.from(command, "utf16le").toString("base64");
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-EncodedCommand", encodedCommand], {
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), `'${value.replaceAll("'", "''")}'`);
+  }
+});
+
+test("guards direct installer test actions before any privileged Node invocation", () => {
+  const bootstrap = read("scripts/bootstrap_windows.ps1");
+  const installer = read("scripts/install_windows.ps1");
+
+  assert.match(bootstrap, /\$Action -eq "test" -or \$Action -eq "test-fixture"/);
+  assert.match(bootstrap, /\$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"/);
+  assert.match(installer, /\[ValidateSet\("install", "uninstall", "status", "verify", "menu", "restore", "test", "test-fixture"\)\]/);
+  assert.match(installer, /\$Action -eq "test" -or \$Action -eq "test-fixture"/);
+  assert.match(installer, /\$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"/);
+  assert.match(installer, /"test" \{[\s\S]*?& \$NodePath --test @tests/);
+  assert.ok(
+    installer.indexOf("$elevatedExitCode = Ensure-Administrator")
+      < installer.indexOf("$runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot")
+      && installer.indexOf("$runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot")
+        < installer.indexOf("switch ($Action)"),
+  );
 });
 
 test("routes root Windows entry points through fixed bootstrap actions", () => {
