@@ -26,6 +26,7 @@ import {
 } from "./lib/locale-config.mjs";
 import {
   compareSourceIdentity,
+  isExistingManagedPathWithin,
   isManagedPathWithin,
   readManagedState,
   validateManagedState,
@@ -1099,13 +1100,30 @@ function readManagedStateOrNull() {
 
 function validateManagedStateBoundaries(state) {
   validateManagedState(state);
+  const backupBase = path.join(getCodexHome(), "zh-cn-install-backups");
+  const expectedBackupRoot = getInstallBackupRoot(state.patchedApp);
+  const expectedLocaleStatePath = path.join(expectedBackupRoot, "locale-state.json");
+  const storeLayoutValid =
+    state.mode !== "store-copy" ||
+    (isWindowsAppsInstall(state.sourceApp) &&
+      sameManagedPath(state.patchedApp, path.join(getPatchedAppRoot(state.sourceApp), "app")));
   if (
-    !isManagedPathWithin(path.join(getCodexHome(), "zh-cn-install-backups"), state.backupRoot) ||
+    !sameManagedPath(state.backupRoot, expectedBackupRoot) ||
+    !sameManagedPath(state.localeStatePath, expectedLocaleStatePath) ||
+    !isManagedPathWithin(backupBase, state.backupRoot) ||
+    (fs.existsSync(state.backupRoot) &&
+      !isExistingManagedPathWithin(backupBase, state.backupRoot)) ||
+    !storeLayoutValid ||
     (state.mode === "store-copy" &&
-      !isManagedPathWithin(getManagedPatchedRoot(), state.patchedApp)) ||
-    (state.mode === "in-place" && !sameManagedPath(state.patchedApp, state.sourceApp))
+      (!isManagedPathWithin(getManagedPatchedRoot(), state.patchedApp) ||
+        fs.existsSync(state.patchedApp) &&
+        !isExistingManagedPathWithin(getManagedPatchedRoot(), state.patchedApp))) ||
+    (state.mode === "in-place" &&
+      (!sameManagedPath(state.patchedApp, state.sourceApp) ||
+        (fs.existsSync(state.sourceApp) &&
+          fs.realpathSync.native(state.patchedApp) !== fs.realpathSync.native(state.sourceApp))))
   ) {
-    throw new Error("托管状态路径不在 Codex 汉化管理目录内，拒绝操作。");
+    throw new Error("托管状态路径布局或解析结果不在 Codex 汉化管理目录内，拒绝操作。");
   }
   return state;
 }
@@ -1118,11 +1136,18 @@ function removeManagedLaunchers() {
 }
 
 function removeManagedStoreCopy(state) {
-  if (!isManagedPathWithin(getManagedPatchedRoot(), state.patchedApp)) {
+  if (
+    !sameManagedPath(state.patchedApp, path.join(getPatchedAppRoot(state.sourceApp), "app")) ||
+    !isManagedPathWithin(getManagedPatchedRoot(), state.patchedApp)
+  ) {
     throw new Error("托管副本路径不在 Codex 汉化管理目录内，拒绝删除。");
   }
-  if (fs.existsSync(state.patchedApp)) {
-    fs.rmSync(state.patchedApp, { recursive: true, force: false });
+  const patchedRoot = path.dirname(state.patchedApp);
+  if (fs.existsSync(patchedRoot)) {
+    if (!isExistingManagedPathWithin(getManagedPatchedRoot(), patchedRoot)) {
+      throw new Error("托管副本解析后越出管理目录，拒绝删除。");
+    }
+    fs.rmSync(patchedRoot, { recursive: true, force: false });
   }
 }
 
@@ -1256,9 +1281,9 @@ function readPatchedAppMarker(patchedRoot) {
 }
 
 function ensurePatchedAppCopy(sourceApp, { skipStop = false } = {}) {
-  let patchedRoot = getPatchedAppRoot(sourceApp);
-  let patchedApp = path.join(patchedRoot, "app");
-  let patchedAsar = path.join(patchedApp, "resources", "app.asar");
+  const patchedRoot = getPatchedAppRoot(sourceApp);
+  const patchedApp = path.join(patchedRoot, "app");
+  const patchedAsar = path.join(patchedApp, "resources", "app.asar");
 
   if (
     readPatchedAppMarker(patchedRoot) === sourceApp &&
@@ -1278,19 +1303,16 @@ function ensurePatchedAppCopy(sourceApp, { skipStop = false } = {}) {
   if (!skipStop) {
     ensureCodexStopped(3, INSTALL_STEP_TOTAL);
   }
+  if (
+    fs.existsSync(patchedRoot) &&
+    (!existingRealPathIsWithin(getManagedPatchedRoot(), patchedRoot) ||
+      fs.lstatSync(patchedRoot).isSymbolicLink())
+  ) {
+    throw new Error("Store 副本目录解析后越出管理目录，拒绝覆盖。");
+  }
   removeDirectoryRobust(patchedRoot);
   if (fs.existsSync(patchedRoot)) {
-    const key = getPatchedAppKey(sourceApp);
-    patchedRoot = path.join(
-      getCodexHome(),
-      "zh-cn-patched",
-      `${key}-${Date.now()}`
-    );
-    patchedApp = path.join(patchedRoot, "app");
-    patchedAsar = path.join(patchedApp, "resources", "app.asar");
-    console.log(
-      `[warn] 旧副本目录被占用，已改用新目录: ${patchedRoot}`
-    );
+    throw new Error(`无法清理确定性 Store 副本目录: ${patchedRoot}`);
   }
 
   fs.mkdirSync(patchedRoot, { recursive: true });
@@ -1592,6 +1614,142 @@ function restoreBundledPlugins() {
   return count;
 }
 
+function assertInstallAttemptFile(filePath) {
+  const stat = fs.lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`安装尝试路径是重解析点或非普通文件: ${filePath}`);
+  }
+}
+
+function captureInstallFiles(paths) {
+  return Object.freeze(
+    paths.map((filePath) => {
+      if (!fs.existsSync(filePath)) {
+        return Object.freeze({ filePath, existed: false, content: null });
+      }
+      assertInstallAttemptFile(filePath);
+      return Object.freeze({ filePath, existed: true, content: fs.readFileSync(filePath) });
+    }),
+  );
+}
+
+function restoreInstallFile(entry) {
+  if (!entry.existed) {
+    if (fs.existsSync(entry.filePath)) {
+      assertInstallAttemptFile(entry.filePath);
+      fs.unlinkSync(entry.filePath);
+    }
+    return;
+  }
+  const parent = path.dirname(entry.filePath);
+  fs.mkdirSync(parent, { recursive: true });
+  const parentStat = fs.lstatSync(parent);
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
+    throw new Error(`安装尝试父目录是重解析点或非目录: ${parent}`);
+  }
+  if (fs.existsSync(entry.filePath)) assertInstallAttemptFile(entry.filePath);
+  const temporary = `${entry.filePath}.${crypto.randomUUID()}.rollback`;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, "wx", 0o600);
+    fs.writeFileSync(descriptor, entry.content);
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, entry.filePath);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {}
+    }
+    try {
+      const stat = fs.lstatSync(temporary);
+      if (stat.isFile() && !stat.isSymbolicLink()) fs.unlinkSync(temporary);
+    } catch {}
+    throw error;
+  }
+}
+
+function restoreInstallFiles(snapshot) {
+  const errors = [];
+  for (const entry of snapshot) {
+    try {
+      restoreInstallFile(entry);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, "安装尝试文件未能全部恢复。");
+  }
+}
+
+function getInstallAttemptPluginPaths(appDir) {
+  const codexHome = getCodexHome();
+  const bundled = findBundledPluginJsonFiles(codexHome);
+  const bundledBackups = bundled.map((pluginJsonPath) =>
+    path.join(getPluginBackupRoot(codexHome), path.relative(codexHome, pluginJsonPath)),
+  );
+  const appResources = findAppResourcePluginFiles(appDir);
+  return [
+    ...bundled,
+    ...bundledBackups,
+    ...appResources.pluginJson,
+    ...appResources.marketplaceJson,
+  ];
+}
+
+function getInstallAttemptLauncherPaths() {
+  const { bat, batAscii, ps1, legacyVbs } = getInstallLauncherPaths();
+  return [
+    bat,
+    batAscii,
+    ps1,
+    legacyVbs,
+    path.join(os.homedir(), "Desktop", "Codex 汉化版.vbs"),
+  ];
+}
+
+function rollbackInstallAttempt({
+  coreActivated,
+  coreTransaction,
+  fileSnapshot,
+  newStoreState,
+  attemptRoot,
+}) {
+  const errors = [];
+  if (coreActivated && !newStoreState) {
+    try {
+      rollbackActivatedCore(coreTransaction);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (newStoreState) {
+    try {
+      removeManagedStoreCopy(newStoreState);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  try {
+    restoreInstallFiles(fileSnapshot);
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    if (fs.existsSync(attemptRoot)) fs.rmSync(attemptRoot, { recursive: true, force: false });
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, "安装失败后的托管回滚未能全部完成。");
+  }
+}
+
 function install(options) {
   console.log("[progress] ========== 开始安装 Codex 简体中文汉化 ==========");
   progressLog(1, INSTALL_STEP_TOTAL, "关闭 Codex 及相关进程…");
@@ -1601,6 +1759,12 @@ function install(options) {
   const installInfo = findCodexInstall(options.codexPath);
   logOk(`已找到 Codex: ${installInfo.app}`);
 
+  const deterministicStoreRoot = isWindowsAppsInstall(installInfo.app)
+    ? getPatchedAppRoot(installInfo.app)
+    : null;
+  const storeRootExistedBefore = Boolean(
+    deterministicStoreRoot && fs.existsSync(deterministicStoreRoot),
+  );
   const target = resolvePatchTarget(installInfo, { skipStop: true });
   const { app, resources, mode, sourceApp, patchedRoot } = target;
   const activeAsarPath = path.join(resources, "app.asar");
@@ -1610,6 +1774,34 @@ function install(options) {
   if (!exePath) throw new Error("未找到 Codex.exe / codex.exe，无法安全激活核心补丁。");
   const backupRoot = getInstallBackupRoot(app);
   const stageRoot = path.join(backupRoot, "staged-core");
+  const attemptRoot = path.join(stageRoot, `.attempt-${crypto.randomUUID()}`);
+  const backupAsarPath = path.join(backupRoot, "app.asar");
+  const backupExePath = path.join(backupRoot, path.basename(exePath));
+  const stagedAsarPath = path.join(stageRoot, "app.asar");
+  const stagedExePath = path.join(stageRoot, path.basename(exePath));
+  const configPath = path.join(getCodexHome(), "config.toml");
+  const localeStatePath = path.join(backupRoot, "locale-state.json");
+  const newStoreState =
+    mode === "store-copy" && !storeRootExistedBefore
+      ? { sourceApp, patchedApp: app }
+      : null;
+  const attemptPaths = [
+    backupAsarPath,
+    backupExePath,
+    stagedAsarPath,
+    stagedExePath,
+    configPath,
+    localeStatePath,
+    ...getInstallAttemptPluginPaths(app),
+    ...(mode === "store-copy" ? getInstallAttemptLauncherPaths() : []),
+  ].filter(
+    (filePath, index, values) =>
+      values.findIndex((candidate) => sameManagedPath(candidate, filePath)) === index &&
+      (!newStoreState ||
+        (!sameManagedPath(deterministicStoreRoot, filePath) &&
+          !isManagedPathWithin(deterministicStoreRoot, filePath))),
+  );
+  const fileSnapshot = captureInstallFiles(attemptPaths);
 
   if (mode === "store-copy") {
     logInfo(`Store 源目录: ${sourceApp}`);
@@ -1623,6 +1815,17 @@ function install(options) {
   }
 
   const transaction = prepareStagedCore({ asarPath: activeAsarPath, exePath, stageRoot, backupRoot });
+  fs.mkdirSync(attemptRoot, { recursive: false, mode: 0o700 });
+  const attemptBackupAsarPath = path.join(attemptRoot, "app.asar");
+  const attemptBackupExePath = path.join(attemptRoot, path.basename(exePath));
+  fs.copyFileSync(activeAsarPath, attemptBackupAsarPath, fs.constants.COPYFILE_EXCL);
+  fs.copyFileSync(exePath, attemptBackupExePath, fs.constants.COPYFILE_EXCL);
+  const attemptCoreTransaction = Object.freeze({
+    ...transaction,
+    backupAsarPath: attemptBackupAsarPath,
+    backupExePath: attemptBackupExePath,
+  });
+  let coreActivated = false;
   const asarPath = transaction.stagedAsarPath;
   logOk("核心文件已暂存，原始文件保持未改动。");
 
@@ -1693,11 +1896,10 @@ function install(options) {
   syncExeAsarIntegrity(path.dirname(transaction.stagedExePath), asarPath);
   verifyPatchedAsar(asarPath, transaction.stagedExePath);
   activateStagedCore(transaction);
+  coreActivated = true;
   logOk("已原子激活 app.asar 与 Codex 可执行文件。");
 
   progressLog(7, INSTALL_STEP_TOTAL, "设置语言并汉化内置插件…");
-  const configPath = path.join(getCodexHome(), "config.toml");
-  const localeStatePath = path.join(backupRoot, "locale-state.json");
   saveLocaleState(localeStatePath, captureLocaleState(configPath));
   applyZhCnLocale(configPath);
   console.log(`[ok] 已写入 ${configPath}`);
@@ -1717,16 +1919,35 @@ function install(options) {
     logOk("汉化补丁已写入。");
   }
 
-  writeManagedState(getManagedStatePath(), {
-    version: 1,
-    patchVersion: PATCH_VERSION,
-    mode,
-    sourceApp,
-    sourceIdentity: getSourceIdentity(sourceApp),
-    patchedApp: app,
-    backupRoot,
-    localeStatePath,
-  });
+  writeManagedState(
+    getManagedStatePath(),
+    {
+      version: 1,
+      patchVersion: PATCH_VERSION,
+      mode,
+      sourceApp,
+      sourceIdentity: getSourceIdentity(sourceApp),
+      patchedApp: app,
+      backupRoot,
+      localeStatePath,
+    },
+    {
+      onFailure() {
+        rollbackInstallAttempt({
+          coreActivated,
+          coreTransaction: attemptCoreTransaction,
+          fileSnapshot,
+          newStoreState,
+          attemptRoot,
+        });
+      },
+    },
+  );
+  try {
+    fs.rmSync(attemptRoot, { recursive: true, force: false });
+  } catch (error) {
+    console.warn(`[warn] 无法清理安装尝试备份: ${error.message}`);
+  }
   logOk(`已发布托管状态: ${getManagedStatePath()}`);
 
   if (options.relaunch !== false) {
@@ -1739,7 +1960,6 @@ function install(options) {
 }
 
 function uninstall(options) {
-  {
   const managed = readManagedStateOrNull();
   if (!managed.state) {
     logInfo(
@@ -1753,6 +1973,12 @@ function uninstall(options) {
   const state = validateManagedStateBoundaries(managed.state);
   ensureCodexStopped();
   if (state.mode === "store-copy") {
+    readLocaleState(state.localeStatePath);
+    restoreLocaleState(path.join(getCodexHome(), "config.toml"), state.localeStatePath);
+    const restoredPlugins = restoreBundledPlugins();
+    if (restoredPlugins > 0) {
+      console.log(`[ok] 已恢复 ${restoredPlugins} 个插件 metadata 文件`);
+    }
     removeManagedLaunchers();
     removeManagedStoreCopy(state);
     fs.unlinkSync(getManagedStatePath());
@@ -1775,8 +2001,18 @@ function uninstall(options) {
   const stageRoot = path.join(backupRoot, "staged-core");
   prepareInstallWriteAccess(app, resources, asarPath);
   const backupExePath = path.join(backupRoot, path.basename(exePath));
-  if (!fs.existsSync(path.join(backupRoot, "app.asar")) || !fs.existsSync(backupExePath)) {
+  const backupAsarPath = path.join(backupRoot, "app.asar");
+  if (!fs.existsSync(backupAsarPath) || !fs.existsSync(backupExePath)) {
     throw new Error("托管核心备份不完整，拒绝恢复。");
+  }
+  if (
+    !isExistingManagedPathWithin(app, asarPath) ||
+    !isExistingManagedPathWithin(app, exePath) ||
+    !isExistingManagedPathWithin(backupRoot, backupAsarPath) ||
+    !isExistingManagedPathWithin(backupRoot, backupExePath) ||
+    !isExistingManagedPathWithin(backupRoot, state.localeStatePath)
+  ) {
+    throw new Error("托管恢复目标或备份解析后越出记录目录，拒绝恢复。");
   }
   readLocaleState(state.localeStatePath);
   const transaction = prepareStagedCore({ asarPath, exePath, stageRoot, backupRoot });
@@ -1787,42 +2023,6 @@ function uninstall(options) {
   fs.unlinkSync(getManagedStatePath());
   logOk("已从托管备份恢复原样。");
   return { restored: true, mode: state.mode };
-  }
-
-  ensureCodexStopped();
-  const installInfo = findCodexInstall(options.codexPath);
-  const target = resolvePatchTarget(installInfo, { preferExistingCopy: true });
-  const { app, resources, mode } = target;
-  const asarPath = path.join(resources, "app.asar");
-  const exePath = ["Codex.exe", "codex.exe"]
-    .map((name) => path.join(app, name))
-    .find((candidate) => fs.existsSync(candidate));
-  if (!exePath) throw new Error("未找到 Codex.exe / codex.exe，无法安全回滚核心补丁。");
-  const backupRoot = resolveBackupRoot(app, resources);
-  const stageRoot = path.join(backupRoot, "staged-core");
-  if (mode === "in-place") {
-    prepareInstallWriteAccess(app, resources, asarPath);
-  }
-
-  const backupExePath = path.join(backupRoot, path.basename(exePath));
-  if (fs.existsSync(path.join(backupRoot, "app.asar")) || fs.existsSync(backupExePath)) {
-    const transaction = prepareStagedCore({ asarPath, exePath, stageRoot, backupRoot });
-    rollbackActivatedCore(transaction);
-    logOk("已从核心文件备份对回滚 app.asar 与 Codex 可执行文件。");
-  }
-  const configPath = path.join(getCodexHome(), "config.toml");
-  const localeStatePath = path.join(backupRoot, "locale-state.json");
-  if (fs.existsSync(localeStatePath)) {
-    restoreLocaleState(configPath, localeStatePath);
-    console.log(`[ok] 已恢复语言配置 ${configPath}`);
-  } else {
-    console.warn("[warn] 未找到语言配置备份，保持当前语言配置不变。");
-  }
-  const restoredPlugins = restoreBundledPlugins();
-  if (restoredPlugins > 0) {
-    console.log(`[ok] 已恢复 ${restoredPlugins} 个插件 metadata 文件`);
-  }
-  console.log("[ok] 已恢复原样。");
 }
 
 function isCodexRunning() {
@@ -1938,7 +2138,10 @@ function buildStatusReport(options) {
     const installInfo = findCodexInstall(options.codexPath);
     report.codexFound = true;
     report.codexPath = installInfo.app;
-    report.sourceCurrent = getSourceIdentity(installInfo.app);
+    report.sourceCurrent =
+      managedState?.mode === "store-copy"
+        ? options.storeSourceIdentity || null
+        : getSourceIdentity(installInfo.app);
     if (managedState) {
       const source = compareSourceIdentity(managedState, report.sourceCurrent);
       report.stale = source.stale;
@@ -2127,11 +2330,15 @@ function status(options) {
 function parseArgs(argv) {
   const action = argv[2] || "install";
   let codexPath = null;
+  let storeSourceIdentity = null;
   let json = false;
   let relaunch = true;
   for (let i = 3; i < argv.length; i += 1) {
     if (argv[i] === "--codex-path" && argv[i + 1]) {
       codexPath = argv[i + 1];
+      i += 1;
+    } else if (argv[i] === "--store-source-identity" && argv[i + 1]) {
+      storeSourceIdentity = argv[i + 1];
       i += 1;
     } else if (argv[i] === "--json") {
       json = true;
@@ -2139,7 +2346,7 @@ function parseArgs(argv) {
       relaunch = false;
     }
   }
-  return { action, codexPath, json, relaunch };
+  return { action, codexPath, storeSourceIdentity, json, relaunch };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
