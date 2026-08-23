@@ -15,6 +15,7 @@ import { planI18nGatePatches } from "./lib/patch-i18n-gate.mjs";
 import {
   applyZhCnLocale,
   captureLocaleState,
+  readLocaleState,
   restoreLocaleState,
   saveLocaleState,
 } from "./lib/locale-config.mjs";
@@ -1806,7 +1807,14 @@ function buildStatusReport(options) {
       fs.existsSync(path.join(backupRoot, "Codex.exe")) ||
       fs.existsSync(path.join(backupRoot, "codex.exe"));
     report.localeBackup = fs.existsSync(path.join(backupRoot, "locale-state.json"));
-    report.localeRestorable = report.localeBackup;
+    if (report.localeBackup) {
+      try {
+        readLocaleState(path.join(backupRoot, "locale-state.json"));
+        report.localeRestorable = true;
+      } catch {
+        report.localeRestorable = false;
+      }
+    }
     report.asarLocalized = isAsarLocalized(
       path.join(checkResources, "app.asar")
     );

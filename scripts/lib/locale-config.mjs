@@ -9,6 +9,7 @@ function validateLocaleState(state) {
     state.version !== 1 ||
     typeof state.existed !== "boolean" ||
     typeof state.contentBase64 !== "string" ||
+    (!state.existed && state.contentBase64 !== "") ||
     Buffer.from(state.contentBase64, "base64").toString("base64") !== state.contentBase64 ||
     Object.keys(state).length !== 3 ||
     !["version", "existed", "contentBase64"].every((key) => key in state)
@@ -18,8 +19,16 @@ function validateLocaleState(state) {
   return state;
 }
 
-function readLocaleState(statePath) {
+export function readLocaleState(statePath) {
   return validateLocaleState(JSON.parse(fs.readFileSync(statePath, "utf8")));
+}
+
+function getNewline(content) {
+  return content.includes("\r\n") ? "\r\n" : "\n";
+}
+
+function desktopLocaleBlock(newline) {
+  return `[desktop]${newline}localeOverride = "zh-CN"${newline}`;
 }
 
 export function captureLocaleState(configPath) {
@@ -50,18 +59,47 @@ export function saveLocaleState(statePath, state) {
 export function applyZhCnLocale(configPath) {
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   let content = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
-  const block = `[desktop]\nlocaleOverride = "zh-CN"\n`;
-  if (/^\[desktop\]/m.test(content)) {
-    if (/localeOverride\s*=/.test(content)) {
-      content = content.replace(
-        /localeOverride\s*=\s*"[^"]*"/,
-        'localeOverride = "zh-CN"',
-      );
-    } else {
-      content = content.replace(/\[desktop\]\s*\n?/, block);
-    }
+  const newline = getNewline(content);
+  const sections = [...content.matchAll(/^[\t ]*\[([^\]\r\n]+)\][\t ]*(?:#.*)?\r?$/gm)];
+  const desktops = sections.filter((section) => section[1] === "desktop");
+  if (desktops.length > 1) {
+    throw new Error("检测到多个 [desktop] 配置段，拒绝修改语言配置。");
+  }
+  if (desktops.length === 0) {
+    const block = desktopLocaleBlock(newline);
+    content = content === ""
+      ? block
+      : `${content}${content.endsWith("\n") ? newline : `${newline}${newline}`}${block}`;
   } else {
-    content = `${content.trimEnd()}\n\n${block}`;
+    const desktop = desktops[0];
+    const headerStart = desktop.index;
+    const headerEnd = (() => {
+      const newlineIndex = content.indexOf("\n", headerStart);
+      return newlineIndex < 0 ? content.length : newlineIndex + 1;
+    })();
+    const sectionIndex = sections.indexOf(desktop);
+    const sectionEnd = sectionIndex + 1 < sections.length
+      ? sections[sectionIndex + 1].index
+      : content.length;
+    const localeOverrides = [
+      ...content.slice(headerEnd, sectionEnd).matchAll(/^[\t ]*localeOverride[\t ]*=/gm),
+    ];
+    if (localeOverrides.length > 1) {
+      throw new Error("检测到多个 localeOverride 配置项，拒绝修改语言配置。");
+    }
+    if (localeOverrides.length === 0) {
+      const headerHasNewline = headerEnd > headerStart && content[headerEnd - 1] === "\n";
+      const insertion = `${headerHasNewline ? "" : newline}localeOverride = "zh-CN"${newline}`;
+      content = `${content.slice(0, headerEnd)}${insertion}${content.slice(headerEnd)}`;
+    } else {
+      const localeOverride = localeOverrides[0];
+      const lineStart = headerEnd + localeOverride.index;
+      const lineEnd = content.indexOf("\n", lineStart);
+      const valueEnd = lineEnd < 0
+        ? content.length
+        : lineEnd - (content[lineEnd - 1] === "\r" ? 1 : 0);
+      content = `${content.slice(0, lineStart)}${localeOverride[0]} "zh-CN"${content.slice(valueEnd)}`;
+    }
   }
   fs.writeFileSync(configPath, content, "utf8");
 }
@@ -73,5 +111,11 @@ export function restoreLocaleState(configPath, statePath) {
     fs.writeFileSync(configPath, Buffer.from(state.contentBase64, "base64"));
     return;
   }
-  if (fs.existsSync(configPath)) fs.unlinkSync(configPath);
+  if (!fs.existsSync(configPath)) return;
+  const current = fs.readFileSync(configPath);
+  const managed = Buffer.from(desktopLocaleBlock("\n"), "utf8");
+  if (!current.equals(managed)) {
+    throw new Error("托管配置已被修改，拒绝删除语言配置。");
+  }
+  fs.unlinkSync(configPath);
 }
