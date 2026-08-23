@@ -85,21 +85,27 @@ export async function validateRelease(root) {
   }
 
   let manifest = null;
+  let manifestParsed = false;
   if (!missing.has("runtime/runtime.json")) {
     const manifestText = await readUtf8(files["runtime/runtime.json"], errors);
     if (manifestText !== null) {
       try {
         manifest = JSON.parse(manifestText);
+        manifestParsed = true;
       } catch (error) {
         errors.push(`Invalid runtime manifest: ${error.message}`);
       }
     }
   }
 
-  if (manifest) {
-    for (const [key, value] of Object.entries(RUNTIME)) {
-      if (manifest[key] !== value) {
-        errors.push(`Runtime manifest ${key} must be ${JSON.stringify(value)}`);
+  if (manifestParsed) {
+    if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
+      errors.push("Runtime manifest must be a non-null, non-array JSON object");
+    } else {
+      for (const [key, value] of Object.entries(RUNTIME)) {
+        if (manifest[key] !== value) {
+          errors.push(`Runtime manifest ${key} must be ${JSON.stringify(value)}`);
+        }
       }
     }
   }
