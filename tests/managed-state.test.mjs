@@ -196,6 +196,88 @@ function runInstallWithBlockedState(fixture) {
   );
 }
 
+function createHealthyInstalledFixture(t, mode) {
+  const fixture = createInstallPublicationFixture(t, mode);
+  fs.rmdirSync(fixture.statePath);
+  const installed = spawnSync(
+    process.execPath,
+    [
+      path.join(fixture.projectRoot, "scripts", "patch-codex-zh-cn.mjs"),
+      "install",
+      "--codex-path",
+      fixture.sourceApp,
+      "--no-relaunch",
+    ],
+    {
+      cwd: fixture.projectRoot,
+      encoding: "utf8",
+      env: { ...process.env, HOME: fixture.home },
+    },
+  );
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout);
+  const state = readManagedState(fixture.statePath);
+  fs.appendFileSync(
+    path.join(state.patchedApp, "resources", "app.asar"),
+    'label:`文件`;关于 ${n.app.getName()};{label:`编辑`,id:x;label:`撤销`;label:`最小化`',
+    "utf8",
+  );
+  fs.writeFileSync(
+    fixture.configPath,
+    '[desktop]\nlocaleOverride = "zh-CN"\n',
+    "utf8",
+  );
+  return { fixture, state };
+}
+
+function runManagedStatus(fixture, state) {
+  const args = [
+    path.join(fixture.projectRoot, "scripts", "patch-codex-zh-cn.mjs"),
+    "status",
+    "--codex-path",
+    fixture.sourceApp,
+  ];
+  if (state.mode === "store-copy") {
+    args.push("--store-source-identity", state.sourceIdentity);
+  }
+  args.push("--json");
+  return spawnSync(process.execPath, args, {
+    cwd: fixture.projectRoot,
+    encoding: "utf8",
+    env: { ...process.env, HOME: fixture.home },
+  });
+}
+
+function createStoreRestoreFixture(t) {
+  const fixture = createManagedFixture(t);
+  const configPath = path.join(fixture.home, ".codex", "config.toml");
+  const localeStatePath = path.join(fixture.backupRoot, "locale-state.json");
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, '[desktop]\nlocaleOverride = "fr-FR"\n', "utf8");
+  saveLocaleState(localeStatePath, captureLocaleState(configPath));
+  fs.writeFileSync(configPath, '[desktop]\nlocaleOverride = "zh-CN"\n', "utf8");
+  fs.mkdirSync(fixture.patchedApp, { recursive: true });
+  fs.writeFileSync(path.join(fixture.patchedApp, "copy.txt"), "managed", "utf8");
+  writeManagedState(fixture.statePath, {
+    version: 1,
+    patchVersion: "0.1.0",
+    mode: "store-copy",
+    sourceApp: fixture.sourceApp,
+    sourceIdentity: "OpenAI.Codex_current",
+    patchedApp: fixture.patchedApp,
+    backupRoot: fixture.backupRoot,
+    localeStatePath,
+  });
+  return { configPath, fixture, localeStatePath };
+}
+
+function runManagedRestore(fixture) {
+  return spawnSync(process.execPath, ["scripts/patch-codex-zh-cn.mjs", "uninstall"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, HOME: fixture.home },
+  });
+}
+
 test("round-trips exactly the managed state schema with an atomic sibling file", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "managed-state-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -804,4 +886,157 @@ test("status exits two when the managed Store target loses its executable", (t) 
   assert.equal(report.targetHealthy, false);
   assert.equal(report.executableIntegrity, false);
   assert.equal(report.asarPath, path.join(state.patchedApp, "resources", "app.asar"));
+});
+
+test("Store restore rejects a POSIX symlink locale destination and keeps state", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX symlink probe; Windows reparse coverage runs in smoke");
+    return;
+  }
+  const { configPath, fixture } = createStoreRestoreFixture(t);
+  const outside = path.join(fixture.root, "outside-config.toml");
+  const outsideBytes = Buffer.from('[desktop]\nlocaleOverride = "zh-CN"\n');
+  fs.unlinkSync(configPath);
+  fs.writeFileSync(outside, outsideBytes);
+  fs.symlinkSync(outside, configPath);
+  const result = runManagedRestore(fixture);
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(fs.readFileSync(outside), outsideBytes);
+  assert.equal(fs.lstatSync(configPath).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(fixture.statePath), true);
+  assert.equal(fs.existsSync(fixture.patchedApp), true);
+});
+
+test("Store restore rejects a POSIX symlink plugin destination and keeps state", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX symlink probe; Windows reparse coverage runs in smoke");
+    return;
+  }
+  const { fixture } = createStoreRestoreFixture(t);
+  const pluginRelative = path.join("plugins", "escape", ".codex-plugin", "plugin.json");
+  const pluginBackup = path.join(fixture.home, ".codex", ".zh-cn-backups", "latest", pluginRelative);
+  const pluginTarget = path.join(fixture.home, ".codex", pluginRelative);
+  const outside = path.join(fixture.root, "outside-plugin.json");
+  const outsideBytes = Buffer.from('{"displayName":"outside"}\n');
+  fs.mkdirSync(path.dirname(pluginBackup), { recursive: true });
+  fs.mkdirSync(path.dirname(pluginTarget), { recursive: true });
+  fs.writeFileSync(pluginBackup, '{"displayName":"original"}\n');
+  fs.writeFileSync(outside, outsideBytes);
+  fs.symlinkSync(outside, pluginTarget);
+  const result = runManagedRestore(fixture);
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(fs.readFileSync(outside), outsideBytes);
+  assert.equal(fs.lstatSync(pluginTarget).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(fixture.statePath), true);
+  assert.equal(fs.existsSync(fixture.patchedApp), true);
+});
+
+test("Store restore rejects a POSIX symlink plugin parent escape", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX symlink probe; Windows reparse coverage runs in smoke");
+    return;
+  }
+  const { fixture } = createStoreRestoreFixture(t);
+  const pluginRelative = path.join("escaped-parent", "plugin.json");
+  const pluginBackup = path.join(fixture.home, ".codex", ".zh-cn-backups", "latest", pluginRelative);
+  const targetParent = path.join(fixture.home, ".codex", "escaped-parent");
+  const outsideRoot = path.join(fixture.root, "outside-plugin-parent");
+  const sentinel = path.join(outsideRoot, "sentinel.txt");
+  fs.mkdirSync(path.dirname(pluginBackup), { recursive: true });
+  fs.mkdirSync(outsideRoot);
+  fs.writeFileSync(pluginBackup, '{"displayName":"original"}\n');
+  fs.writeFileSync(sentinel, "keep", "utf8");
+  fs.symlinkSync(outsideRoot, targetParent, "dir");
+  const result = runManagedRestore(fixture);
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.readFileSync(sentinel, "utf8"), "keep");
+  assert.equal(fs.existsSync(path.join(outsideRoot, "plugin.json")), false);
+  assert.equal(fs.existsSync(fixture.statePath), true);
+  assert.equal(fs.existsSync(fixture.patchedApp), true);
+});
+
+test("healthy in-place status does not require a generated launcher", (t) => {
+  const { fixture, state } = createHealthyInstalledFixture(t, "in-place");
+  const result = runManagedStatus(fixture, state);
+  const report = JSON.parse(result.stdout);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.equal(report.ok, true);
+  assert.equal(report.patchInstalled, true);
+  assert.equal(report.mode, "in-place");
+  assert.equal(report.targetHealthy, true);
+  assert.equal(report.launcherAvailable, false);
+  assert.equal(report.launcherPathContained, false);
+});
+
+test("managed status rejects a POSIX ASAR symlink escape", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX symlink probe; Windows reparse coverage runs in smoke");
+    return;
+  }
+  const { fixture, state } = createHealthyInstalledFixture(t, "store-copy");
+  const asarPath = path.join(state.patchedApp, "resources", "app.asar");
+  const outsideAsar = path.join(path.dirname(fixture.projectRoot), "outside-app.asar");
+  fs.renameSync(asarPath, outsideAsar);
+  fs.symlinkSync(outsideAsar, asarPath);
+  const result = runManagedStatus(fixture, state);
+  const report = JSON.parse(result.stdout);
+  assert.equal(result.status, 2);
+  assert.equal(report.ok, false);
+  assert.equal(report.targetHealthy, false);
+  assert.equal(report.executableIntegrity, false);
+});
+
+test("managed status rejects a POSIX executable symlink escape", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX symlink probe; Windows reparse coverage runs in smoke");
+    return;
+  }
+  const { fixture, state } = createHealthyInstalledFixture(t, "store-copy");
+  const exePath = path.join(state.patchedApp, "Codex.exe");
+  const outsideExe = path.join(path.dirname(fixture.projectRoot), "outside-Codex.exe");
+  fs.renameSync(exePath, outsideExe);
+  fs.symlinkSync(outsideExe, exePath);
+  const result = runManagedStatus(fixture, state);
+  const report = JSON.parse(result.stdout);
+  assert.equal(result.status, 2);
+  assert.equal(report.ok, false);
+  assert.equal(report.targetHealthy, false);
+  assert.equal(report.executableIntegrity, false);
+});
+
+test("Windows restore smoke rejects a plugin parent junction escape", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows reparse smoke requires Windows");
+    return;
+  }
+  const { fixture } = createStoreRestoreFixture(t);
+  const pluginRelative = path.join("escaped-parent", "plugin.json");
+  const pluginBackup = path.join(fixture.home, ".codex", ".zh-cn-backups", "latest", pluginRelative);
+  const targetParent = path.join(fixture.home, ".codex", "escaped-parent");
+  const outsideRoot = path.join(fixture.root, "outside-plugin-parent");
+  fs.mkdirSync(path.dirname(pluginBackup), { recursive: true });
+  fs.mkdirSync(outsideRoot);
+  fs.writeFileSync(pluginBackup, '{"displayName":"original"}\n');
+  fs.symlinkSync(outsideRoot, targetParent, "junction");
+  const result = runManagedRestore(fixture);
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.existsSync(path.join(outsideRoot, "plugin.json")), false);
+  assert.equal(fs.existsSync(fixture.statePath), true);
+});
+
+test("Windows status smoke rejects a resources junction escape", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows reparse smoke requires Windows");
+    return;
+  }
+  const { fixture, state } = createHealthyInstalledFixture(t, "store-copy");
+  const resources = path.join(state.patchedApp, "resources");
+  const outsideResources = path.join(path.dirname(fixture.projectRoot), "outside-resources");
+  fs.renameSync(resources, outsideResources);
+  fs.symlinkSync(outsideResources, resources, "junction");
+  const result = runManagedStatus(fixture, state);
+  const report = JSON.parse(result.stdout);
+  assert.equal(result.status, 2);
+  assert.equal(report.ok, false);
+  assert.equal(report.targetHealthy, false);
 });

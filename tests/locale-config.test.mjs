@@ -151,3 +151,89 @@ test("rejects an existing locale state with invalid base64 content", (t) => {
     /无效的 locale 状态文件/,
   );
 });
+
+test("restore rejects a POSIX symlink config destination", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX symlink probe; Windows reparse coverage runs in smoke");
+    return;
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "locale-restore-link-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const managedRoot = path.join(root, ".codex");
+  const configPath = path.join(managedRoot, "config.toml");
+  const statePath = path.join(root, "backup", "locale-state.json");
+  const outside = path.join(root, "outside.toml");
+  const outsideBytes = Buffer.from('[desktop]\nlocaleOverride = "zh-CN"\n');
+  fs.mkdirSync(managedRoot, { recursive: true });
+  fs.writeFileSync(outside, outsideBytes);
+  fs.symlinkSync(outside, configPath);
+  saveLocaleState(statePath, {
+    version: 1,
+    existed: true,
+    contentBase64: Buffer.from('[desktop]\nlocaleOverride = "fr-FR"\n').toString("base64"),
+  });
+
+  assert.throws(
+    () => restoreLocaleState(configPath, statePath, managedRoot),
+    /重解析点|符号链接|安全目录/,
+  );
+  assert.deepEqual(fs.readFileSync(outside), outsideBytes);
+  assert.equal(fs.lstatSync(configPath).isSymbolicLink(), true);
+});
+
+test("restore rejects a POSIX symlink parent escape", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX symlink probe; Windows reparse coverage runs in smoke");
+    return;
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "locale-restore-parent-link-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const managedRoot = path.join(root, ".codex");
+  const outsideRoot = path.join(root, "outside");
+  const configPath = path.join(managedRoot, "nested", "config.toml");
+  const outsideConfig = path.join(outsideRoot, "config.toml");
+  const statePath = path.join(root, "backup", "locale-state.json");
+  const outsideBytes = Buffer.from("outside");
+  fs.mkdirSync(managedRoot, { recursive: true });
+  fs.mkdirSync(outsideRoot);
+  fs.writeFileSync(outsideConfig, outsideBytes);
+  fs.symlinkSync(outsideRoot, path.join(managedRoot, "nested"), "dir");
+  saveLocaleState(statePath, {
+    version: 1,
+    existed: true,
+    contentBase64: Buffer.from("original").toString("base64"),
+  });
+
+  assert.throws(
+    () => restoreLocaleState(configPath, statePath, managedRoot),
+    /重解析点|符号链接|安全目录/,
+  );
+  assert.deepEqual(fs.readFileSync(outsideConfig), outsideBytes);
+});
+
+test("Windows restore smoke rejects a config parent junction", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows reparse smoke requires Windows");
+    return;
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "locale-restore-junction-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const managedRoot = path.join(root, ".codex");
+  const outsideRoot = path.join(root, "outside");
+  const configPath = path.join(managedRoot, "config.toml");
+  const statePath = path.join(root, "backup", "locale-state.json");
+  const outsideBytes = Buffer.from("outside");
+  fs.mkdirSync(outsideRoot);
+  fs.writeFileSync(path.join(outsideRoot, "config.toml"), outsideBytes);
+  fs.symlinkSync(outsideRoot, managedRoot, "junction");
+  saveLocaleState(statePath, {
+    version: 1,
+    existed: true,
+    contentBase64: Buffer.from("original").toString("base64"),
+  });
+  assert.throws(
+    () => restoreLocaleState(configPath, statePath, managedRoot),
+    /重解析点|符号链接|安全目录/,
+  );
+  assert.deepEqual(fs.readFileSync(path.join(outsideRoot, "config.toml")), outsideBytes);
+});

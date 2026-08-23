@@ -212,3 +212,46 @@ export function isExistingManagedPathWithin(parent, child, allowEqual = false) {
     return false;
   }
 }
+
+export function isSafeManagedFileDestination(root, destination) {
+  if (!isManagedPathWithin(root, destination)) return false;
+  try {
+    const rootStat = fs.lstatSync(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return false;
+    const rootReal = fs.realpathSync.native(root);
+    const api = pathApi(rootReal);
+    if (api !== pathApi(destination)) return false;
+    const relative = api.relative(root, destination);
+    if (!relative || relative.startsWith("..") || api.isAbsolute(relative)) return false;
+
+    const parts = relative.split(api.sep).filter(Boolean);
+    let current = root;
+    for (let index = 0; index < parts.length; index += 1) {
+      current = api.join(current, parts[index]);
+      let stat;
+      try {
+        stat = fs.lstatSync(current);
+      } catch (error) {
+        if (error.code === "ENOENT") break;
+        throw error;
+      }
+      if (stat.isSymbolicLink()) return false;
+      const isDestination = index === parts.length - 1;
+      if ((!isDestination && !stat.isDirectory()) || (isDestination && !stat.isFile())) {
+        return false;
+      }
+      const currentReal = fs.realpathSync.native(current);
+      const resolvedRelative = api.relative(rootReal, currentReal);
+      if (
+        !resolvedRelative ||
+        resolvedRelative.startsWith("..") ||
+        api.isAbsolute(resolvedRelative)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}

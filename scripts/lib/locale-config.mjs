@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isSafeManagedFileDestination } from "./managed-state.mjs";
 
 function validateLocaleState(state) {
   if (
@@ -104,10 +105,16 @@ export function applyZhCnLocale(configPath) {
   fs.writeFileSync(configPath, content, "utf8");
 }
 
-export function restoreLocaleState(configPath, statePath) {
+export function restoreLocaleState(configPath, statePath, managedRoot = path.dirname(configPath)) {
   const state = readLocaleState(statePath);
+  if (!isSafeManagedFileDestination(managedRoot, configPath)) {
+    throw new Error(`locale 恢复目标包含重解析点、符号链接或逃逸安全目录: ${configPath}`);
+  }
   if (state.existed) {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    if (!isSafeManagedFileDestination(managedRoot, configPath)) {
+      throw new Error(`locale 恢复目标包含重解析点、符号链接或逃逸安全目录: ${configPath}`);
+    }
     fs.writeFileSync(configPath, Buffer.from(state.contentBase64, "base64"));
     return;
   }

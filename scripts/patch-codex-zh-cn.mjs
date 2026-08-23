@@ -28,6 +28,7 @@ import {
   compareSourceIdentity,
   isExistingManagedPathWithin,
   isManagedPathWithin,
+  isSafeManagedFileDestination,
   readManagedState,
   validateManagedState,
   writeManagedState,
@@ -1240,32 +1241,6 @@ function getPatchedAppKey(sourceApp) {
     .slice(0, 16);
 }
 
-function getActivePatchedRootFile() {
-  return path.join(getCodexHome(), "zh-cn-patched-active.txt");
-}
-
-function readActivePatchedRootRecord() {
-  try {
-    const lines = fs
-      .readFileSync(getActivePatchedRootFile(), "utf8")
-      .split(/\r?\n/)
-      .filter(Boolean);
-    if (lines.length === 0) return null;
-    return { root: lines[0], sourceApp: lines[1] || "" };
-  } catch {
-    return null;
-  }
-}
-
-function writeActivePatchedRootRecord(patchedRoot, sourceApp) {
-  fs.mkdirSync(getCodexHome(), { recursive: true });
-  fs.writeFileSync(
-    getActivePatchedRootFile(),
-    `${patchedRoot}\n${sourceApp}\n`,
-    "utf8"
-  );
-}
-
 function getPatchedAppRoot(sourceApp) {
   const key = getPatchedAppKey(sourceApp);
   return path.join(getManagedPatchedRoot(), key);
@@ -1592,7 +1567,7 @@ function restoreBundledPlugins() {
   const backupRoot = getPluginBackupRoot(codexHome);
   if (!fs.existsSync(backupRoot)) return 0;
 
-  let count = 0;
+  const restorePlan = [];
   function walk(dir, rel = "") {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const nextRel = rel ? `${rel}/${entry.name}` : entry.name;
@@ -1603,15 +1578,23 @@ function restoreBundledPlugins() {
       }
       if (entry.name !== "plugin.json") continue;
       const target = path.join(codexHome, nextRel);
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(nextAbs, target);
-      console.log(`[restore] ${nextRel}`);
-      count += 1;
+      if (!isSafeManagedFileDestination(codexHome, target)) {
+        throw new Error(`插件恢复目标包含重解析点、符号链接或逃逸安全目录: ${target}`);
+      }
+      restorePlan.push({ nextAbs, nextRel, target });
     }
   }
 
   walk(backupRoot);
-  return count;
+  for (const { nextAbs, nextRel, target } of restorePlan) {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    if (!isSafeManagedFileDestination(codexHome, target)) {
+      throw new Error(`插件恢复目标包含重解析点、符号链接或逃逸安全目录: ${target}`);
+    }
+    fs.copyFileSync(nextAbs, target);
+    console.log(`[restore] ${nextRel}`);
+  }
+  return restorePlan.length;
 }
 
 function assertInstallAttemptFile(filePath) {
@@ -1974,7 +1957,11 @@ function uninstall(options) {
   ensureCodexStopped();
   if (state.mode === "store-copy") {
     readLocaleState(state.localeStatePath);
-    restoreLocaleState(path.join(getCodexHome(), "config.toml"), state.localeStatePath);
+    restoreLocaleState(
+      path.join(getCodexHome(), "config.toml"),
+      state.localeStatePath,
+      getCodexHome(),
+    );
     const restoredPlugins = restoreBundledPlugins();
     if (restoredPlugins > 0) {
       console.log(`[ok] 已恢复 ${restoredPlugins} 个插件 metadata 文件`);
@@ -2017,7 +2004,11 @@ function uninstall(options) {
   readLocaleState(state.localeStatePath);
   const transaction = prepareStagedCore({ asarPath, exePath, stageRoot, backupRoot });
   rollbackActivatedCore(transaction);
-  restoreLocaleState(path.join(getCodexHome(), "config.toml"), state.localeStatePath);
+  restoreLocaleState(
+    path.join(getCodexHome(), "config.toml"),
+    state.localeStatePath,
+    getCodexHome(),
+  );
   const restoredPlugins = restoreBundledPlugins();
   if (restoredPlugins > 0) console.log(`[ok] 已恢复 ${restoredPlugins} 个插件 metadata 文件`);
   fs.unlinkSync(getManagedStatePath());
@@ -2115,6 +2106,7 @@ function buildManagedStatusReport(options, managed) {
     launcherTargetContained: false,
     launcherPathContained: false,
     launcherAvailable: false,
+    launcherRequired: false,
     rollbackAvailable: false,
     localeOverride: getLocaleOverride(),
     localeZhCn: false,
@@ -2147,11 +2139,19 @@ function buildManagedStatusReport(options, managed) {
     const app = state.patchedApp;
     const resources = path.join(app, "resources");
     const asarPath = path.join(resources, "app.asar");
-    const exePath = ["Codex.exe", "codex.exe"]
-      .map((name) => path.join(app, name))
-      .find((candidate) => fs.existsSync(candidate)) || null;
-    const appDirectory = fs.existsSync(app) && fs.statSync(app).isDirectory();
-    const asarFile = fs.existsSync(asarPath) && fs.statSync(asarPath).isFile();
+    let appDirectory = false;
+    try {
+      const appStat = fs.lstatSync(app);
+      appDirectory = appStat.isDirectory() && !appStat.isSymbolicLink();
+    } catch {}
+    const asarContained =
+      appDirectory && isExistingManagedPathWithin(app, asarPath);
+    const exePath = appDirectory
+      ? ["Codex.exe", "codex.exe"]
+          .map((name) => path.join(app, name))
+          .find((candidate) => isExistingManagedPathWithin(app, candidate)) || null
+      : null;
+    const asarFile = asarContained && fs.statSync(asarPath).isFile();
     const exeFile = Boolean(exePath && fs.statSync(exePath).isFile());
 
     report.sourceCurrent =
@@ -2175,6 +2175,7 @@ function buildManagedStatusReport(options, managed) {
 
     const managedRoot = getManagedPatchedRoot();
     report.launcherTarget = app;
+    report.launcherRequired = state.mode === "store-copy";
     report.launcherTargetContained =
       state.mode === "store-copy"
         ? isManagedPathWithin(managedRoot, app) &&
@@ -2249,6 +2250,11 @@ function buildManagedStatusReport(options, managed) {
   const sourceHealthy =
     state?.mode !== "store-copy" ||
     Boolean(report.sourceCurrent && !report.stale);
+  const launcherHealthy =
+    !report.launcherRequired ||
+    (report.launcherAvailable &&
+      report.launcherTargetContained &&
+      report.launcherPathContained);
   report.patchInstalled = Boolean(
     report.managedState &&
       !report.managedStateError &&
@@ -2260,9 +2266,7 @@ function buildManagedStatusReport(options, managed) {
       report.localeZhCn &&
       report.localeRestorable &&
       report.pluginsHealthy &&
-      report.launcherAvailable &&
-      report.launcherTargetContained &&
-      report.launcherPathContained &&
+      launcherHealthy &&
       report.rollbackAvailable,
   );
   report.ok = Boolean(report.runtime.healthy && report.patchInstalled);
@@ -2499,6 +2503,7 @@ function printStatusReport(report, asJson) {
   console.log("[env] launcherTargetContained=" + Boolean(report.launcherTargetContained));
   console.log("[env] launcherPathContained=" + Boolean(report.launcherPathContained));
   console.log("[env] launcherAvailable=" + Boolean(report.launcherAvailable));
+  console.log("[env] launcherRequired=" + Boolean(report.launcherRequired));
   console.log("[env] codexFound=" + report.codexFound);
   console.log("[env] codexPath=" + (report.codexPath || ""));
   console.log("[env] target=" + JSON.stringify(report.target));

@@ -186,7 +186,9 @@ function Show-StatusReport {
 
     Write-InfoLine "汉化启动器: $($Report.launcherPath)"
     Write-InfoLine "汉化启动目标: $($Report.launcherTarget)"
-    if ($Report.launcherAvailable -and $Report.launcherTargetContained -and $Report.launcherPathContained) {
+    if (-not $Report.launcherRequired) {
+        Write-InfoLine "启动器路径 / 目标包含关系: in-place 模式不要求生成启动器"
+    } elseif ($Report.launcherAvailable -and $Report.launcherTargetContained -and $Report.launcherPathContained) {
         Write-Ok "启动器路径 / 目标包含关系: valid"
     } else {
         Write-Bad "启动器路径 / 目标包含关系: invalid"

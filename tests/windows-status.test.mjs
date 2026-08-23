@@ -15,6 +15,11 @@ test("PowerShell status contract retains the Node status and exits with it", () 
   assert.match(installer, /"status"\s*\{[\s\S]*exit\s+\(\[int\]\$report\.statusExitCode\)/);
   assert.match(installer, /--store-source-identity/);
   assert.match(installer, /__CODEX_STORE_IDENTITY_UNAVAILABLE__/);
+  assert.match(installer, /if \(-not \$Report\.launcherRequired\)/);
+  assert.match(
+    installer,
+    /installedReport\.statusExitCode -ne 0 -or -not \$installedReport\.ok/,
+  );
 });
 
 test("PowerShell status prints managed health fields and propagates exit code two", (t) => {
@@ -40,7 +45,7 @@ test("PowerShell status prints managed health fields and propagates exit code tw
   const harnessPath = path.join(root, "status-harness.ps1");
   fs.writeFileSync(
     nodeStubPath,
-    `const args = process.argv.slice(2);\nconst identityAt = args.indexOf("--store-source-identity");\nconst current = identityAt >= 0 ? args[identityAt + 1] : null;\nconsole.log(JSON.stringify({ok:false,nodeOk:true,nodeVersion:process.version,runtime:{trusted:true,healthy:true},managedState:true,managedStateError:null,mode:"store-copy",sourceIdentity:"OpenAI.Codex_previous",sourceCurrent:current,stale:true,codexFound:true,codexPath:"C:\\\\managed\\\\app",codexRunning:false,target:{app:"C:\\\\managed\\\\app",healthy:false},targetHealthy:false,asarPath:"C:\\\\managed\\\\app\\\\resources\\\\app.asar",exePath:"C:\\\\managed\\\\app\\\\Codex.exe",asarLocalized:true,i18nGateStatus:"already-enabled",i18nGateChanged:1,i18nGateRecognized:1,i18nGateAmbiguous:0,i18nGateFiles:[{path:"main.js",status:"already-enabled"}],i18nGateEnabled:true,executableIntegrity:false,localeOverride:"zh-CN",localeZhCn:true,localeBackup:true,localeRestorable:true,pluginsLocalized:1,pluginsTotal:1,pluginsHealthy:true,plugins:[],launcherPath:"C:\\\\bundle\\\\Codex 汉化版.bat",launcherTarget:"C:\\\\managed\\\\app",launcherTargetContained:true,launcherAvailable:true,rollbackAvailable:true,patchInstalled:false,readyToInstall:false,messages:[]}));\nprocess.exitCode = 2;\n`,
+    `const args = process.argv.slice(2);\nconst identityAt = args.indexOf("--store-source-identity");\nconst current = identityAt >= 0 ? args[identityAt + 1] : null;\nconsole.log(JSON.stringify({ok:false,nodeOk:true,nodeVersion:process.version,runtime:{trusted:true,healthy:true},managedState:true,managedStateError:null,mode:"store-copy",sourceIdentity:"OpenAI.Codex_previous",sourceCurrent:current,stale:true,codexFound:true,codexPath:"C:\\\\managed\\\\app",codexRunning:false,target:{app:"C:\\\\managed\\\\app",healthy:false},targetHealthy:false,asarPath:"C:\\\\managed\\\\app\\\\resources\\\\app.asar",exePath:"C:\\\\managed\\\\app\\\\Codex.exe",asarLocalized:true,i18nGateStatus:"already-enabled",i18nGateChanged:1,i18nGateRecognized:1,i18nGateAmbiguous:0,i18nGateFiles:[{path:"main.js",status:"already-enabled"}],i18nGateEnabled:true,executableIntegrity:false,localeOverride:"zh-CN",localeZhCn:true,localeBackup:true,localeRestorable:true,pluginsLocalized:1,pluginsTotal:1,pluginsHealthy:true,plugins:[],launcherPath:"C:\\\\bundle\\\\Codex 汉化版.bat",launcherTarget:"C:\\\\managed\\\\app",launcherTargetContained:true,launcherPathContained:true,launcherAvailable:true,launcherRequired:true,rollbackAvailable:true,patchInstalled:false,readyToInstall:false,messages:[]}));\nprocess.exitCode = 2;\n`,
     "utf8",
   );
   const escapedInstaller = installerPath.replaceAll("'", "''");
