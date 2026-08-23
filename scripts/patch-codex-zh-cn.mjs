@@ -12,6 +12,12 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { planI18nGatePatches } from "./lib/patch-i18n-gate.mjs";
+import {
+  applyZhCnLocale,
+  captureLocaleState,
+  restoreLocaleState,
+  saveLocaleState,
+} from "./lib/locale-config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, "..");
@@ -1028,40 +1034,6 @@ function patchZhBundle(content, menuTitleMap) {
   return { buffer: Buffer.from(text, "utf8"), count: additions.length };
 }
 
-function setCodexLocale() {
-  const codexHome = path.join(os.homedir(), ".codex");
-  const configPath = path.join(codexHome, "config.toml");
-  fs.mkdirSync(codexHome, { recursive: true });
-
-  let content = fs.existsSync(configPath)
-    ? fs.readFileSync(configPath, "utf8")
-    : "";
-  const block = `[desktop]\nlocaleOverride = "zh-CN"\n`;
-  if (/^\[desktop\]/m.test(content)) {
-    if (/localeOverride\s*=/.test(content)) {
-      content = content.replace(
-        /localeOverride\s*=\s*"[^"]*"/,
-        'localeOverride = "zh-CN"'
-      );
-    } else {
-      content = content.replace(/\[desktop\]\s*\n?/, block);
-    }
-  } else {
-    content = `${content.trimEnd()}\n\n${block}`;
-  }
-  fs.writeFileSync(configPath, content, "utf8");
-  console.log(`[ok] 已写入 ${configPath}`);
-}
-
-function restoreCodexLocale() {
-  const configPath = path.join(os.homedir(), ".codex", "config.toml");
-  if (!fs.existsSync(configPath)) return;
-  let content = fs.readFileSync(configPath, "utf8");
-  content = content.replace(/localeOverride\s*=\s*"zh-CN"/, 'localeOverride = "en-US"');
-  fs.writeFileSync(configPath, content, "utf8");
-  console.log(`[ok] 已恢复语言配置 ${configPath}`);
-}
-
 function backupFile(filePath, backupRoot) {
   if (!fs.existsSync(filePath)) return;
   const rel = path.basename(filePath);
@@ -1659,7 +1631,11 @@ function install(options) {
   }
 
   progressLog(7, INSTALL_STEP_TOTAL, "设置语言并汉化内置插件…");
-  setCodexLocale();
+  const configPath = path.join(getCodexHome(), "config.toml");
+  const localeStatePath = path.join(backupRoot, "locale-state.json");
+  saveLocaleState(localeStatePath, captureLocaleState(configPath));
+  applyZhCnLocale(configPath);
+  console.log(`[ok] 已写入 ${configPath}`);
 
   const bundledPlugins = loadJson("bundled-plugins-zh-CN.json");
   const pluginCount = patchBundledPlugins(bundledPlugins, { appDir: app });
@@ -1702,7 +1678,14 @@ function uninstall(options) {
   for (const exeName of ["Codex.exe", "codex.exe"]) {
     restoreBackup(backupRoot, app, exeName);
   }
-  restoreCodexLocale();
+  const configPath = path.join(getCodexHome(), "config.toml");
+  const localeStatePath = path.join(backupRoot, "locale-state.json");
+  if (fs.existsSync(localeStatePath)) {
+    restoreLocaleState(configPath, localeStatePath);
+    console.log(`[ok] 已恢复语言配置 ${configPath}`);
+  } else {
+    console.warn("[warn] 未找到语言配置备份，保持当前语言配置不变。");
+  }
   const restoredPlugins = restoreBundledPlugins();
   if (restoredPlugins > 0) {
     console.log(`[ok] 已恢复 ${restoredPlugins} 个插件 metadata 文件`);
@@ -1781,6 +1764,8 @@ function buildStatusReport(options) {
     i18nGateAmbiguous: 0,
     i18nGateFiles: [],
     exeBackup: false,
+    localeBackup: false,
+    localeRestorable: false,
     localeOverride: getLocaleOverride(),
     localeZhCn: false,
     pluginsLocalized: 0,
@@ -1820,6 +1805,8 @@ function buildStatusReport(options) {
     report.exeBackup =
       fs.existsSync(path.join(backupRoot, "Codex.exe")) ||
       fs.existsSync(path.join(backupRoot, "codex.exe"));
+    report.localeBackup = fs.existsSync(path.join(backupRoot, "locale-state.json"));
+    report.localeRestorable = report.localeBackup;
     report.asarLocalized = isAsarLocalized(
       path.join(checkResources, "app.asar")
     );
@@ -1894,6 +1881,8 @@ function printStatusReport(report, asJson) {
   console.log("[env] i18nGateFiles=" + JSON.stringify(report.i18nGateFiles));
   console.log("[env] asarBackup=" + report.asarBackup);
   console.log("[env] exeBackup=" + report.exeBackup);
+  console.log("[env] localeBackup=" + report.localeBackup);
+  console.log("[env] localeRestorable=" + report.localeRestorable);
   console.log("[env] localeOverride=" + (report.localeOverride || ""));
   console.log("[env] localeZhCn=" + report.localeZhCn);
   console.log("[env] pluginsLocalized=" + report.pluginsLocalized);

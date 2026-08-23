@@ -138,8 +138,9 @@ test("status exposes stable i18n gate fields in JSON and human output", (t) => {
   );
 
   assert.equal(json.status, 0);
+  const jsonReport = JSON.parse(json.stdout);
   assert.deepEqual(
-    JSON.parse(json.stdout).i18nGateFiles,
+    jsonReport.i18nGateFiles,
     [
       {
         path: "webview/assets/a.js",
@@ -150,8 +151,12 @@ test("status exposes stable i18n gate fields in JSON and human output", (t) => {
       },
     ],
   );
+  assert.equal(jsonReport.localeBackup, false);
+  assert.equal(jsonReport.localeRestorable, false);
   assert.match(json.stdout, /"i18nGateStatus":"patched"/);
   assert.match(json.stdout, /"i18nGateChanged":1/);
   assert.match(human.stdout, /\[env\] i18nGateStatus=patched/);
   assert.match(human.stdout, /\[env\] i18nGateFiles=\[\{"path":"webview\/assets\/a\.js"/);
+  assert.match(human.stdout, /\[env\] localeBackup=false/);
+  assert.match(human.stdout, /\[env\] localeRestorable=false/);
 });
