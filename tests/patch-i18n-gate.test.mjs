@@ -85,3 +85,24 @@ test("reports already-enabled when all files use recognized true fallbacks", () 
   assert.equal(plan.changedCount, 0);
   assert.deepEqual(plan.replacements, []);
 });
+
+test("rejects non-get identifiers that end with get and preserves bytes", () => {
+  const input = Buffer.from('forget("enable_i18n",false)');
+  const result = patchI18nGateBuffer(input);
+  assert.equal(result.status, "ambiguous");
+  assert.equal(result.buffer.equals(input), true);
+});
+
+test("preserves every original buffer in an ambiguous plan", () => {
+  const entries = [
+    { path: "webview/a.js", buffer: Buffer.from('f.get("enable_i18n",false)') },
+    { path: "webview/b.js", buffer: Buffer.from('f.get("enable_i18n",value)') },
+  ];
+  const plan = planI18nGatePatches(entries);
+  assert.equal(plan.status, "ambiguous");
+  assert.deepEqual(plan.replacements, []);
+  assert.equal(plan.files.length, entries.length);
+  plan.files.forEach((file, index) => {
+    assert.equal(file.buffer.equals(entries[index].buffer), true);
+  });
+});

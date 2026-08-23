@@ -1,5 +1,5 @@
 const KEY_RE = /(["'`])enable_i18n\1/g;
-const CALL_RE = /(?:[\w$?]+\.)?get\(\s*(["'`])enable_i18n\1\s*,\s*(false|true|!1|!0)\s*\)/g;
+const CALL_RE = /(?<![\w$?])(?:[\w$?]+\.)?get\(\s*(["'`])enable_i18n\1\s*,\s*(false|true|!1|!0)\s*\)/g;
 
 function result(status, buffer, changedCount, recognizedCount, ambiguousCount) {
   return { status, buffer, changedCount, recognizedCount, ambiguousCount };
@@ -36,13 +36,18 @@ function planResult(status, files, replacements) {
 export function planI18nGatePatches(entries) {
   const files = entries
     .filter(({ buffer }) => buffer.includes("enable_i18n"))
-    .map(({ path, buffer }) => ({ path, ...patchI18nGateBuffer(buffer) }));
+    .map(({ path, buffer }) => ({ path, original: buffer, ...patchI18nGateBuffer(buffer) }));
   if (files.length === 0) return planResult("missing", files, []);
   if (files.some(({ status }) => status === "ambiguous")) {
-    return planResult("ambiguous", files, []);
+    return planResult(
+      "ambiguous",
+      files.map(({ original, ...file }) => ({ ...file, buffer: original })),
+      [],
+    );
   }
+  const reports = files.map(({ original, ...file }) => file);
   const replacements = files
     .filter(({ status }) => status === "patched")
     .map(({ path, buffer }) => ({ path, buffer }));
-  return planResult(replacements.length ? "patched" : "already-enabled", files, replacements);
+  return planResult(replacements.length ? "patched" : "already-enabled", reports, replacements);
 }
