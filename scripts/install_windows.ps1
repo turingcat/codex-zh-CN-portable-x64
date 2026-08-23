@@ -135,6 +135,22 @@ function Show-StatusReport {
     Write-Host "【环境检测】" -ForegroundColor Cyan
     Write-Host ""
 
+    if ($Report.managedState) {
+        Write-Ok "托管状态: $($Report.mode)"
+    } elseif ($Report.managedStateError) {
+        Write-Bad "托管状态无效: $($Report.managedStateError)"
+    } else {
+        Write-WarnLine "未找到托管状态"
+    }
+    if ($Report.stale) {
+        Write-Bad "Store 源已更新或不可用，请重新运行 install-windows.bat"
+    } elseif ($Report.sourceCurrent) {
+        Write-InfoLine "Store 源身份: $($Report.sourceCurrent)"
+    }
+    if ($Report.launcherTarget) {
+        Write-InfoLine "汉化启动目标: $($Report.launcherTarget)"
+    }
+
     if ($Report.nodeOk) {
         Write-Ok "Node.js $($Report.nodeVersion)"
     } else {

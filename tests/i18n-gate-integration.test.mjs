@@ -165,7 +165,7 @@ test("status exposes stable i18n gate fields in JSON and human output", (t) => {
     { cwd: process.cwd(), encoding: "utf8" },
   );
 
-  assert.equal(json.status, 0);
+  assert.equal(json.status, 2);
   const jsonReport = JSON.parse(json.stdout);
   assert.deepEqual(
     jsonReport.i18nGateFiles,

@@ -24,12 +24,20 @@ import {
   restoreLocaleState,
   saveLocaleState,
 } from "./lib/locale-config.mjs";
+import {
+  compareSourceIdentity,
+  isManagedPathWithin,
+  readManagedState,
+  validateManagedState,
+  writeManagedState,
+} from "./lib/managed-state.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, "..");
 const resourcesDir = path.join(projectRoot, "resources");
 const ASAR_BLOCK_SIZE = 4 * 1024 * 1024;
 const INSTALL_STEP_TOTAL = 8;
+const PATCH_VERSION = "0.1.0";
 
 /** 实时输出进度（避免 PowerShell 管道缓冲时长时间无输出） */
 function progressLog(step, total, message) {
@@ -1053,6 +1061,71 @@ function getCodexHome() {
   return path.join(os.homedir(), ".codex");
 }
 
+function getManagedStatePath() {
+  return path.join(getCodexHome(), "zh-cn-patched-active.json");
+}
+
+function getManagedPatchedRoot() {
+  return path.join(getCodexHome(), "zh-cn-patched");
+}
+
+function normalizedPathKey(value) {
+  return path.normalize(value).toLowerCase();
+}
+
+function sameManagedPath(left, right) {
+  return normalizedPathKey(left) === normalizedPathKey(right);
+}
+
+function getSourceIdentity(sourceApp) {
+  const segments = path.normalize(sourceApp).split(/[\\/]+/).filter(Boolean);
+  const windowsAppsIndex = segments.findIndex(
+    (segment) => segment.toLowerCase() === "windowsapps",
+  );
+  return windowsAppsIndex >= 0 && segments[windowsAppsIndex + 1]
+    ? segments[windowsAppsIndex + 1]
+    : path.basename(sourceApp);
+}
+
+function readManagedStateOrNull() {
+  const statePath = getManagedStatePath();
+  if (!fs.existsSync(statePath)) return { state: null, error: null };
+  try {
+    return { state: readManagedState(statePath), error: null };
+  } catch (error) {
+    return { state: null, error };
+  }
+}
+
+function validateManagedStateBoundaries(state) {
+  validateManagedState(state);
+  if (
+    !isManagedPathWithin(path.join(getCodexHome(), "zh-cn-install-backups"), state.backupRoot) ||
+    (state.mode === "store-copy" &&
+      !isManagedPathWithin(getManagedPatchedRoot(), state.patchedApp)) ||
+    (state.mode === "in-place" && !sameManagedPath(state.patchedApp, state.sourceApp))
+  ) {
+    throw new Error("托管状态路径不在 Codex 汉化管理目录内，拒绝操作。");
+  }
+  return state;
+}
+
+function removeManagedLaunchers() {
+  const { bat, batAscii, ps1, legacyVbs } = getInstallLauncherPaths();
+  for (const launcher of [bat, batAscii, ps1, legacyVbs]) {
+    if (fs.existsSync(launcher)) fs.unlinkSync(launcher);
+  }
+}
+
+function removeManagedStoreCopy(state) {
+  if (!isManagedPathWithin(getManagedPatchedRoot(), state.patchedApp)) {
+    throw new Error("托管副本路径不在 Codex 汉化管理目录内，拒绝删除。");
+  }
+  if (fs.existsSync(state.patchedApp)) {
+    fs.rmSync(state.patchedApp, { recursive: true, force: false });
+  }
+}
+
 function isWindowsAppsInstall(targetPath) {
   const normalized = path.normalize(targetPath).toLowerCase();
   return normalized.includes(`${path.sep}windowsapps${path.sep}`);
@@ -1169,16 +1242,8 @@ function writeActivePatchedRootRecord(patchedRoot, sourceApp) {
 }
 
 function getPatchedAppRoot(sourceApp) {
-  const active = readActivePatchedRootRecord();
-  if (
-    active?.root &&
-    fs.existsSync(active.root) &&
-    (!sourceApp || active.sourceApp === sourceApp)
-  ) {
-    return active.root;
-  }
   const key = getPatchedAppKey(sourceApp);
-  return path.join(getCodexHome(), "zh-cn-patched", key);
+  return path.join(getManagedPatchedRoot(), key);
 }
 
 function readPatchedAppMarker(patchedRoot) {
@@ -1200,7 +1265,6 @@ function ensurePatchedAppCopy(sourceApp, { skipStop = false } = {}) {
     fs.existsSync(patchedAsar)
   ) {
     logInfo("已存在可写副本，跳过复制。");
-    writeActivePatchedRootRecord(patchedRoot, sourceApp);
     return {
       app: patchedApp,
       resources: path.join(patchedApp, "resources"),
@@ -1241,7 +1305,6 @@ function ensurePatchedAppCopy(sourceApp, { skipStop = false } = {}) {
   });
   const copySeconds = Math.round((Date.now() - copyStarted) / 1000);
   fs.writeFileSync(path.join(patchedRoot, ".zh-cn-source.txt"), sourceApp, "utf8");
-  writeActivePatchedRootRecord(patchedRoot, sourceApp);
   logOk(`副本复制完成（耗时 ${copySeconds} 秒）: ${patchedApp}`);
   return {
     app: patchedApp,
@@ -1654,6 +1717,18 @@ function install(options) {
     logOk("汉化补丁已写入。");
   }
 
+  writeManagedState(getManagedStatePath(), {
+    version: 1,
+    patchVersion: PATCH_VERSION,
+    mode,
+    sourceApp,
+    sourceIdentity: getSourceIdentity(sourceApp),
+    patchedApp: app,
+    backupRoot,
+    localeStatePath,
+  });
+  logOk(`已发布托管状态: ${getManagedStatePath()}`);
+
   if (options.relaunch !== false) {
     progressLog(8, INSTALL_STEP_TOTAL, "重新启动 Codex…");
     startCodex(app, patchedRoot, mode);
@@ -1664,6 +1739,56 @@ function install(options) {
 }
 
 function uninstall(options) {
+  {
+  const managed = readManagedStateOrNull();
+  if (!managed.state) {
+    logInfo(
+      managed.error
+        ? "托管状态无效，未修改任何文件。请重新运行 install-windows.bat。"
+        : "未找到托管状态，未修改任何文件。",
+    );
+    return { restored: false, reason: managed.error ? "invalid-state" : "not-managed" };
+  }
+
+  const state = validateManagedStateBoundaries(managed.state);
+  ensureCodexStopped();
+  if (state.mode === "store-copy") {
+    removeManagedLaunchers();
+    removeManagedStoreCopy(state);
+    fs.unlinkSync(getManagedStatePath());
+    logOk("已移除托管 Store 副本和启动入口；WindowsApps 原始安装未改动。");
+    return { restored: true, mode: state.mode };
+  }
+
+  const installInfo = findCodexInstall(options.codexPath);
+  if (!sameManagedPath(installInfo.app, state.sourceApp)) {
+    throw new Error("当前 Codex 安装与托管状态不一致，拒绝恢复。");
+  }
+  const app = installInfo.app;
+  const resources = installInfo.resources;
+  const asarPath = path.join(resources, "app.asar");
+  const exePath = ["Codex.exe", "codex.exe"]
+    .map((name) => path.join(app, name))
+    .find((candidate) => fs.existsSync(candidate));
+  if (!exePath) throw new Error("未找到 Codex.exe / codex.exe，无法安全回滚核心补丁。");
+  const backupRoot = state.backupRoot;
+  const stageRoot = path.join(backupRoot, "staged-core");
+  prepareInstallWriteAccess(app, resources, asarPath);
+  const backupExePath = path.join(backupRoot, path.basename(exePath));
+  if (!fs.existsSync(path.join(backupRoot, "app.asar")) || !fs.existsSync(backupExePath)) {
+    throw new Error("托管核心备份不完整，拒绝恢复。");
+  }
+  readLocaleState(state.localeStatePath);
+  const transaction = prepareStagedCore({ asarPath, exePath, stageRoot, backupRoot });
+  rollbackActivatedCore(transaction);
+  restoreLocaleState(path.join(getCodexHome(), "config.toml"), state.localeStatePath);
+  const restoredPlugins = restoreBundledPlugins();
+  if (restoredPlugins > 0) console.log(`[ok] 已恢复 ${restoredPlugins} 个插件 metadata 文件`);
+  fs.unlinkSync(getManagedStatePath());
+  logOk("已从托管备份恢复原样。");
+  return { restored: true, mode: state.mode };
+  }
+
   ensureCodexStopped();
   const installInfo = findCodexInstall(options.codexPath);
   const target = resolvePatchTarget(installInfo, { preferExistingCopy: true });
@@ -1759,6 +1884,14 @@ function buildStatusReport(options) {
     ok: true,
     nodeVersion: process.version,
     nodeOk: true,
+    runtime: { nodeVersion: process.version, trusted: true },
+    target: null,
+    managedState: false,
+    managedStateError: null,
+    mode: null,
+    sourceIdentity: null,
+    sourceCurrent: null,
+    stale: false,
     codexPath: null,
     codexFound: false,
     codexRunning: isCodexRunning(),
@@ -1773,6 +1906,9 @@ function buildStatusReport(options) {
     exeBackup: false,
     localeBackup: false,
     localeRestorable: false,
+    executableIntegrity: false,
+    launcherTarget: null,
+    rollbackAvailable: false,
     localeOverride: getLocaleOverride(),
     localeZhCn: false,
     pluginsLocalized: 0,
@@ -1783,12 +1919,32 @@ function buildStatusReport(options) {
     messages: [],
   };
 
+  const managed = readManagedStateOrNull();
+  let managedState = null;
+  if (managed.state) {
+    try {
+      managedState = validateManagedStateBoundaries(managed.state);
+      report.managedState = true;
+      report.mode = managedState.mode;
+      report.sourceIdentity = managedState.sourceIdentity;
+    } catch (error) {
+      report.managedStateError = error.message;
+    }
+  } else if (managed.error) {
+    report.managedStateError = managed.error.message;
+  }
+
   try {
     const installInfo = findCodexInstall(options.codexPath);
     report.codexFound = true;
     report.codexPath = installInfo.app;
+    report.sourceCurrent = getSourceIdentity(installInfo.app);
+    if (managedState) {
+      const source = compareSourceIdentity(managedState, report.sourceCurrent);
+      report.stale = source.stale;
+    }
     report.asarPath = path.join(installInfo.resources, "app.asar");
-    const patchTarget = isWindowsAppsInstall(installInfo.app)
+    let patchTarget = isWindowsAppsInstall(installInfo.app)
       ? (() => {
           const patchedRoot = getPatchedAppRoot(installInfo.app);
           const patchedApp = path.join(patchedRoot, "app");
@@ -1803,19 +1959,32 @@ function buildStatusReport(options) {
             };
           }
           return installInfo;
-        })()
+      })()
       : installInfo;
+    if (managedState?.mode === "store-copy") {
+      patchTarget = {
+        app: managedState.patchedApp,
+        resources: path.join(managedState.patchedApp, "resources"),
+      };
+    }
     const checkApp = patchTarget.app || installInfo.app;
     const checkResources = patchTarget.resources || installInfo.resources;
-    const backupRoot = resolveBackupRoot(checkApp, checkResources);
+    report.target = { app: checkApp, mode: report.mode || "in-place" };
+    report.launcherTarget =
+      managedState?.mode === "store-copy" &&
+      isManagedPathWithin(getManagedPatchedRoot(), managedState.patchedApp)
+        ? managedState.patchedApp
+        : null;
+    const backupRoot = managedState?.backupRoot || resolveBackupRoot(checkApp, checkResources);
     report.asarBackup = fs.existsSync(path.join(backupRoot, "app.asar"));
     report.exeBackup =
       fs.existsSync(path.join(backupRoot, "Codex.exe")) ||
       fs.existsSync(path.join(backupRoot, "codex.exe"));
-    report.localeBackup = fs.existsSync(path.join(backupRoot, "locale-state.json"));
+    const localeStatePath = managedState?.localeStatePath || path.join(backupRoot, "locale-state.json");
+    report.localeBackup = fs.existsSync(localeStatePath);
     if (report.localeBackup) {
       try {
-        readLocaleState(path.join(backupRoot, "locale-state.json"));
+        readLocaleState(localeStatePath);
         report.localeRestorable = true;
       } catch {
         report.localeRestorable = false;
@@ -1830,6 +1999,19 @@ function buildStatusReport(options) {
     report.i18nGateRecognized = i18nGate.recognizedCount;
     report.i18nGateAmbiguous = i18nGate.ambiguousCount;
     report.i18nGateFiles = i18nGate.files;
+    const checkExePath = ["Codex.exe", "codex.exe"]
+      .map((name) => path.join(checkApp, name))
+      .find((candidate) => fs.existsSync(candidate));
+    if (checkExePath) {
+      try {
+        verifyPatchedAsar(path.join(checkResources, "app.asar"), checkExePath);
+        report.executableIntegrity = true;
+      } catch {}
+    }
+    report.rollbackAvailable =
+      managedState?.mode === "store-copy"
+        ? fs.existsSync(managedState.patchedApp)
+        : Boolean(managedState && report.asarBackup && report.exeBackup && report.localeRestorable);
     if (isWindowsAppsInstall(installInfo.app)) {
       report.messages.push(
         "检测到 Microsoft Store 安装：将在 %USERPROFILE%\\.codex\\zh-cn-patched\\ 维护可写副本；请用安装目录下的「Codex 汉化版.bat」启动。"
@@ -1842,6 +2024,7 @@ function buildStatusReport(options) {
   } catch (error) {
     report.ok = false;
     report.readyToInstall = false;
+    if (managedState?.mode === "store-copy") report.stale = true;
     report.messages.push(error.message);
   }
 
@@ -1851,9 +2034,12 @@ function buildStatusReport(options) {
   report.pluginsTotal = pluginSummary.total;
   report.plugins = pluginSummary.details;
   report.patchInstalled =
+    report.managedState &&
+    !report.stale &&
     report.asarLocalized &&
     report.i18nGateStatus === "already-enabled" &&
     report.localeZhCn &&
+    report.executableIntegrity &&
     (report.pluginsTotal === 0 || report.pluginsLocalized === report.pluginsTotal);
 
   if (!report.codexRunning && report.codexFound) {
@@ -1874,6 +2060,15 @@ function buildStatusReport(options) {
     report.messages.push("尚未找到内置插件缓存，首次汉化前建议先启动一次 Codex。");
   }
 
+  report.ok = Boolean(
+    report.runtime.trusted &&
+      report.codexFound &&
+      report.managedState &&
+      !report.managedStateError &&
+      !report.stale &&
+      report.patchInstalled &&
+      report.rollbackAvailable,
+  );
   return report;
 }
 
@@ -1884,6 +2079,14 @@ function printStatusReport(report, asJson) {
   }
 
   console.log("[env] nodeVersion=" + report.nodeVersion);
+  console.log("[env] runtimeTrusted=" + report.runtime.trusted);
+  console.log("[env] managedState=" + report.managedState);
+  console.log("[env] managedStateError=" + (report.managedStateError || ""));
+  console.log("[env] mode=" + (report.mode || ""));
+  console.log("[env] sourceIdentity=" + (report.sourceIdentity || ""));
+  console.log("[env] sourceCurrent=" + (report.sourceCurrent || ""));
+  console.log("[env] stale=" + report.stale);
+  console.log("[env] launcherTarget=" + (report.launcherTarget || ""));
   console.log("[env] codexFound=" + report.codexFound);
   console.log("[env] codexPath=" + (report.codexPath || ""));
   console.log("[env] codexRunning=" + report.codexRunning);
@@ -1897,6 +2100,8 @@ function printStatusReport(report, asJson) {
   console.log("[env] exeBackup=" + report.exeBackup);
   console.log("[env] localeBackup=" + report.localeBackup);
   console.log("[env] localeRestorable=" + report.localeRestorable);
+  console.log("[env] executableIntegrity=" + report.executableIntegrity);
+  console.log("[env] rollbackAvailable=" + report.rollbackAvailable);
   console.log("[env] localeOverride=" + (report.localeOverride || ""));
   console.log("[env] localeZhCn=" + report.localeZhCn);
   console.log("[env] pluginsLocalized=" + report.pluginsLocalized);

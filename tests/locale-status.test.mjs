@@ -62,7 +62,7 @@ test("status marks malformed locale backup as not restorable", (t) => {
     { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, HOME: homeDir } },
   );
 
-  assert.equal(result.status, 0);
+  assert.equal(result.status, 2);
   const report = JSON.parse(result.stdout);
   assert.equal(report.localeBackup, true);
   assert.equal(report.localeRestorable, false);

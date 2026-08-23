@@ -73,7 +73,50 @@ function Get-PatchedCodexExe {
     return $null
 }
 
+function Test-SaneAbsolutePath {
+    param([string]$PathValue)
+    if ([string]::IsNullOrWhiteSpace($PathValue) -or $PathValue -match "[\x00\r\n]" -or -not [System.IO.Path]::IsPathRooted($PathValue)) { return $false }
+    if (($PathValue -split '[\\/]+') -contains '..') { return $false }
+    return $true
+}
+
+function Test-ManagedPath {
+    param([string]$PathValue, [string]$ParentPath)
+    if (-not (Test-SaneAbsolutePath $PathValue) -or -not (Test-SaneAbsolutePath $ParentPath)) { return $false }
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($PathValue).TrimEnd('\', '/')
+        $fullParent = [System.IO.Path]::GetFullPath($ParentPath).TrimEnd('\', '/')
+        return $fullPath.StartsWith($fullParent + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch { return $false }
+}
+
+function Read-ManagedState {
+    $statePath = Join-Path -Path $env:USERPROFILE -ChildPath '.codex\zh-cn-patched-active.json'
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { throw '未找到托管汉化状态。请重新运行 install-windows.bat。' }
+    try { $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { throw '托管汉化状态无效。请重新运行 install-windows.bat。' }
+    $required = @('version', 'patchVersion', 'mode', 'sourceApp', 'sourceIdentity', 'patchedApp', 'backupRoot', 'localeStatePath')
+    $actual = @($state.PSObject.Properties.Name)
+    if ($actual.Count -ne $required.Count -or @($actual | Where-Object { $_ -notin $required }).Count -ne 0) { throw '托管汉化状态无效。请重新运行 install-windows.bat。' }
+    if ($state.version -ne 1 -or $state.mode -ne 'store-copy' -or $state.patchVersion -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$' -or $state.sourceIdentity -notmatch '^[^\\/:\r\n]+$') { throw '托管汉化状态无效。请重新运行 install-windows.bat。' }
+    $managedRoot = Join-Path -Path $env:USERPROFILE -ChildPath '.codex\zh-cn-patched'
+    if (-not (Test-SaneAbsolutePath $state.sourceApp) -or -not (Test-SaneAbsolutePath $state.backupRoot) -or -not (Test-ManagedPath -PathValue $state.patchedApp -ParentPath $managedRoot) -or -not (Test-ManagedPath -PathValue $state.localeStatePath -ParentPath $state.backupRoot) -or [System.IO.Path]::GetFileName($state.localeStatePath) -ne 'locale-state.json') { throw '托管汉化状态路径无效。请重新运行 install-windows.bat。' }
+    return $state
+}
+
 try {
+    $state = Read-ManagedState
+    $current = Get-AppxPackage -Name 'OpenAI.Codex' | Sort-Object Version -Descending | Select-Object -First 1
+    if ($null -eq $current) { throw '未检测到当前 Store 版 Codex。请重新运行 install-windows.bat。' }
+    $currentIdentity = Split-Path -Leaf $current.InstallLocation
+    if ($currentIdentity -ne $state.sourceIdentity) { throw 'Codex 已更新，请重新运行 install-windows.bat。' }
+    $appDir = $state.patchedApp
+    if (-not (Test-Path -LiteralPath $appDir -PathType Container)) { throw '托管 Codex 副本缺失。请重新运行 install-windows.bat。' }
+    $exePath = Get-PatchedCodexExe -AppDir $appDir
+    if (-not $exePath) { throw '托管 Codex 副本中未找到 Codex.exe。请重新运行 install-windows.bat。' }
+    Set-CodexLocaleZhCn
+    Start-Process -FilePath $exePath -WorkingDirectory $appDir | Out-Null
+    exit 0
+
     $activeFile = Join-Path -Path $env:USERPROFILE -ChildPath '.codex\zh-cn-patched-active.txt'
     if (-not (Test-Path -LiteralPath $activeFile)) {
         Show-LauncherError @(
