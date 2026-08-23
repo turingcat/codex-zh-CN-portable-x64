@@ -109,15 +109,17 @@ test("encodes hostile UAC values as one PowerShell literal when Windows PowerShe
   }
 });
 
-test("guards direct installer test actions before any privileged Node invocation", () => {
+test("guards only fixture actions before any privileged Node invocation", () => {
   const bootstrap = read("scripts/bootstrap_windows.ps1");
   const installer = read("scripts/install_windows.ps1");
 
-  assert.match(bootstrap, /\$Action -eq "test" -or \$Action -eq "test-fixture"/);
+  assert.match(bootstrap, /\$Action -eq "test-fixture"/);
   assert.match(bootstrap, /\$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"/);
+  assert.doesNotMatch(bootstrap, /\$Action -eq "test" -or \$Action -eq "test-fixture"/);
   assert.match(installer, /\[ValidateSet\("install", "uninstall", "status", "verify", "menu", "restore", "test", "test-fixture"\)\]/);
-  assert.match(installer, /\$Action -eq "test" -or \$Action -eq "test-fixture"/);
+  assert.match(installer, /\$Action -eq "test-fixture"/);
   assert.match(installer, /\$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"/);
+  assert.doesNotMatch(installer, /\$Action -eq "test" -or \$Action -eq "test-fixture"/);
   assert.match(installer, /"test" \{[\s\S]*?& \$NodePath --test @tests/);
   assert.ok(
     installer.indexOf("$elevatedExitCode = Ensure-Administrator")

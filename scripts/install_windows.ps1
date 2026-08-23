@@ -508,7 +508,7 @@ if (-not (Test-Path $patchScript)) {
     throw "缺少补丁脚本: $patchScript"
 }
 
-if (($Action -eq "test" -or $Action -eq "test-fixture") -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne "1") {
+if ($Action -eq "test-fixture" -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne "1") {
     throw "Test actions are disabled outside the smoke harness."
 }
 
@@ -554,7 +554,28 @@ switch ($Action) {
         exit $LASTEXITCODE
     }
     "test-fixture" {
-        Write-InfoLine "Smoke harness fixture action accepted."
+        if (-not $CodexPath) {
+            throw "test-fixture requires -CodexPath."
+        }
+
+        & $NodePath $patchScript "install" --codex-path $CodexPath --no-relaunch
+        if ($LASTEXITCODE -ne 0) {
+            throw "Fixture install failed: $LASTEXITCODE"
+        }
+
+        $report = Get-StatusReport -CustomCodexPath $CodexPath
+        Show-StatusReport -Report $report
+        if ([int]$report.statusExitCode -ne 0 -or -not $report.i18nGateEnabled -or -not $report.patchInstalled) {
+            throw "Fixture status verification failed: $($report.statusExitCode)"
+        }
+        Write-Host "[smoke] i18nGateEnabled=true"
+        Write-Host "[smoke] patchInstalled=true"
+
+        & $NodePath $patchScript "uninstall" --codex-path $CodexPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Fixture restore failed: $LASTEXITCODE"
+        }
+        Write-Host "[smoke] restoreComplete=true"
     }
 }
 

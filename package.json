@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check scripts/patch-codex-zh-cn.mjs && node --check scripts/verify-patch.mjs"
+    "check": "node --check scripts/patch-codex-zh-cn.mjs && node --check scripts/verify-patch.mjs",
+    "validate": "node scripts/validate-release.mjs",
+    "package": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1"
   }
 }

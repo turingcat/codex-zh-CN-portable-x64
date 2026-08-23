@@ -1,0 +1,19 @@
+name: windows-smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Node tests with bundled runtime
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap_windows.ps1 -Action test -NoPause
+      - name: Windows fixture smoke
+        shell: powershell
+        env:
+          CODEX_ZH_CN_TEST_FIXTURE: "1"
+        run: .\tests\windows-smoke.ps1

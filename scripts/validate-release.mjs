@@ -29,6 +29,8 @@ const REQUIRED_FILES = [
   "UPSTREAM.md",
   "THIRD_PARTY_NOTICES.md",
   "README.md",
+  "docs/windows-acceptance.md",
+  "package.json",
   "resources/native-menu-zh-CN.json",
   "resources/menu-hardcoded-zh-CN.json",
   "resources/bundled-plugins-zh-CN.json",
@@ -39,6 +41,7 @@ const REQUIRED_FILES = [
   "scripts/verify-patch.mjs",
   "scripts/uninstall-codex-store.ps1",
   "scripts/package-release.ps1",
+  "scripts/release-files.mjs",
 ];
 
 async function isFile(file) {

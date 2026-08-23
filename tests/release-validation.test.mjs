@@ -15,6 +15,9 @@ test("reports all missing release artifacts", async (t) => {
   assert.equal(result.ok, false);
   assert.match(result.errors.join("\n"), /node-v24\.19\.0-win-x64\.zip/);
   assert.match(result.errors.join("\n"), /THIRD_PARTY_NOTICES\.md/);
+  assert.match(result.errors.join("\n"), /docs\/windows-acceptance\.md/);
+  assert.match(result.errors.join("\n"), /package\.json/);
+  assert.match(result.errors.join("\n"), /scripts\/release-files\.mjs/);
 });
 
 test("validates the complete offline release tree", async () => {
