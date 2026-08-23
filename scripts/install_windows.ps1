@@ -1,7 +1,10 @@
 ﻿param(
-    [ValidateSet("install", "uninstall", "status", "verify", "menu")]
+    [ValidateSet("install", "uninstall", "status", "verify", "menu", "restore", "test-fixture")]
     [string]$Action = "menu",
     [string]$CodexPath = "",
+
+    [Parameter(Mandatory = $true)]
+    [string]$NodePath,
     [switch]$Interactive,
     [switch]$NoPause
 )
@@ -43,7 +46,15 @@ function Write-InfoLine([string]$Message) {
 }
 
 function Test-NodeAvailable {
-    return [bool](Get-Command node -ErrorAction SilentlyContinue)
+    return Test-Path -LiteralPath $NodePath -PathType Leaf
+}
+
+function ConvertTo-NativeArgument {
+    param([string]$Value)
+
+    $escapedValue = [regex]::Replace($Value, '(\\*)"', '$1$1\\"')
+    $escapedValue = [regex]::Replace($escapedValue, '(\\*)$', '$1$1')
+    return '"' + $escapedValue + '"'
 }
 
 function Test-IsAdministrator {
@@ -78,8 +89,8 @@ function Invoke-ElevatedInstaller {
 
 function Ensure-Administrator {
     if (Test-IsAdministrator) { return }
-    $extra = @("-Action", $Action)
-    if ($CodexPath) { $extra += @("-CodexPath", $CodexPath) }
+    $extra = @("-Action", $Action, "-NodePath", (ConvertTo-NativeArgument $NodePath))
+    if ($CodexPath) { $extra += @("-CodexPath", (ConvertTo-NativeArgument $CodexPath)) }
     if ($NoPause) { $extra += "-NoPause" }
     Invoke-ElevatedInstaller -ExtraArgs $extra
 }
@@ -99,7 +110,7 @@ function Get-StatusReport {
         $argsList += @("--codex-path", $CustomCodexPath)
     }
 
-    $output = & node @argsList 2>&1
+    $output = & $NodePath @argsList 2>&1
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 2) {
         throw "环境检测失败，退出码 $LASTEXITCODE`n$output"
     }
@@ -201,7 +212,7 @@ function Invoke-PatchAction {
 
     Write-InfoLine "安装进度将实时显示在下方，复制文件时可能需 2–5 分钟，请勿关闭窗口。"
     $patchLines = [System.Collections.Generic.List[string]]::new()
-    & node @argsList 2>&1 | ForEach-Object {
+    & $NodePath @argsList 2>&1 | ForEach-Object {
         $line = "$_"
         if ($line -match '^\[progress-bar\]') {
             Write-Host $line -ForegroundColor Magenta
@@ -249,7 +260,7 @@ function Invoke-VerifyPatch {
     }
 
     Write-Step "【验证补丁】"
-    & node $verifyScript $report.asarPath
+    & $NodePath $verifyScript $report.asarPath
     if ($LASTEXITCODE -ne 0) {
         throw "验证脚本执行失败，退出码 $LASTEXITCODE"
     }
@@ -371,10 +382,10 @@ function Start-InteractiveMenu {
             "path" {
                 if ($customCodexPath) {
                     $customCodexPath = ""
-                    & node @($patchScript, "clear-path") | Out-Null
+                    & $NodePath @($patchScript, "clear-path") | Out-Null
                     Write-Ok "已清除自定义 Codex 路径，将自动检测。"
                 } else {
-                    $inputPath = (Read-Host "请输入 Codex 安装目录（MSIX 包根目录或 app 子目录，例如 C:\Program Files\WindowsApps\OpenAI.Codex_...）").Trim('"')
+                    $inputPath = (Read-Host "请输入 Codex 安装目录（或其 app 子目录）").Trim('"')
                     $asarOk = $false
                     $resolvedPath = $inputPath
                     if ($inputPath) {
@@ -387,7 +398,7 @@ function Start-InteractiveMenu {
                     }
                     if ($asarOk) {
                         $customCodexPath = $resolvedPath
-                        & node @($patchScript, "save-path", "--codex-path", $customCodexPath) | Out-Null
+                        & $NodePath @($patchScript, "save-path", "--codex-path", $customCodexPath) | Out-Null
                         if ($LASTEXITCODE -ne 0) {
                             Write-WarnLine "路径已用于本次会话，但未能写入持久化配置"
                         } else {
@@ -418,7 +429,7 @@ if ($Interactive -or $Action -eq "menu") {
     exit 0
 }
 
-if ($Action -in @("install", "uninstall", "verify")) {
+if ($Action -in @("install", "uninstall", "restore", "verify")) {
     Ensure-Administrator
 }
 
@@ -437,6 +448,13 @@ switch ($Action) {
     "uninstall" {
         Write-Step "【恢复英文 / 重置】"
         Invoke-PatchAction -PatchAction "uninstall" -CustomCodexPath $CodexPath
+    }
+    "restore" {
+        Write-Step "【恢复英文 / 重置】"
+        Invoke-PatchAction -PatchAction "uninstall" -CustomCodexPath $CodexPath
+    }
+    "test-fixture" {
+        Write-InfoLine "Smoke harness fixture action accepted."
     }
 }
 

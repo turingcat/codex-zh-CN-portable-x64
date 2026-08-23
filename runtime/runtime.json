@@ -1,0 +1,8 @@
+{
+  "version": "v24.19.0",
+  "architecture": "x64",
+  "archive": "node-v24.19.0-win-x64.zip",
+  "extractedDirectory": "node-v24.19.0-win-x64",
+  "executable": "node.exe",
+  "sha256": "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73"
+}
