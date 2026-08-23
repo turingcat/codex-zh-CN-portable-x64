@@ -11,6 +11,7 @@ import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { planI18nGatePatches } from "./lib/patch-i18n-gate.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, "..");
@@ -213,6 +214,62 @@ function replaceAsarFileContent(asarPath, filePath, patchedContent) {
 
 function replaceStandaloneAsarFile(asarPath, relativePath, contentBuffer) {
   return replaceAsarFileContent(asarPath, relativePath, contentBuffer);
+}
+
+function toI18nGateReport(plan) {
+  return {
+    status: plan.status,
+    changedCount: plan.changedCount,
+    recognizedCount: plan.recognizedCount,
+    ambiguousCount: plan.ambiguousCount,
+    files: plan.files.map(({ path, status, changedCount, recognizedCount, ambiguousCount }) => ({
+      path,
+      status,
+      changedCount,
+      recognizedCount,
+      ambiguousCount,
+    })),
+  };
+}
+
+function collectI18nGateEntries(asarPath) {
+  const data = fs.readFileSync(asarPath);
+  const parsed = readAsarHeader(data, asarPath);
+  return walkAsarFiles(parsed.header)
+    .filter(([filePath, entry]) => filePath.endsWith(".js") && !entry.unpacked)
+    .map(([filePath, entry]) => {
+      const offset = 8 + parsed.headerSize + Number(entry.offset);
+      return { path: filePath, buffer: data.subarray(offset, offset + Number(entry.size)) };
+    })
+    .filter(({ buffer }) => buffer.includes("enable_i18n"))
+    .sort(({ path: a }, { path: b }) => a.localeCompare(b));
+}
+
+export function inspectI18nGateInAsar(asarPath) {
+  return toI18nGateReport(planI18nGatePatches(collectI18nGateEntries(asarPath)));
+}
+
+export function patchI18nGateInAsar(asarPath) {
+  const plan = planI18nGatePatches(collectI18nGateEntries(asarPath));
+  if (plan.status === "missing" || plan.status === "ambiguous") {
+    throw new Error(`Unsupported enable_i18n gate state: ${plan.status}`);
+  }
+  for (const replacement of plan.replacements) {
+    replaceAsarFileContent(asarPath, replacement.path, replacement.buffer);
+  }
+  const verified = inspectI18nGateInAsar(asarPath);
+  if (verified.status !== "already-enabled") {
+    throw new Error("enable_i18n post-verification failed");
+  }
+  return { ...verified, changedCount: plan.changedCount };
+}
+
+function logI18nGateReport(report) {
+  console.log("[i18n-gate] i18nGateStatus=" + report.status);
+  console.log("[i18n-gate] i18nGateChanged=" + report.changedCount);
+  console.log("[i18n-gate] i18nGateRecognized=" + report.recognizedCount);
+  console.log("[i18n-gate] i18nGateAmbiguous=" + report.ambiguousCount);
+  console.log("[i18n-gate] i18nGateFiles=" + JSON.stringify(report.files));
 }
 
 function getAsarHeaderHash(asarPath) {
@@ -1591,6 +1648,8 @@ function install(options) {
     }
   }
 
+  const i18nGate = patchI18nGateInAsar(asarPath);
+  logI18nGateReport(i18nGate);
   syncExeAsarIntegrity(app, asarPath);
 
   progressLog(6, INSTALL_STEP_TOTAL, "汉化 webview 与界面文案…");
@@ -1716,6 +1775,11 @@ function buildStatusReport(options) {
     asarPath: null,
     asarBackup: false,
     asarLocalized: false,
+    i18nGateStatus: null,
+    i18nGateChanged: 0,
+    i18nGateRecognized: 0,
+    i18nGateAmbiguous: 0,
+    i18nGateFiles: [],
     exeBackup: false,
     localeOverride: getLocaleOverride(),
     localeZhCn: false,
@@ -1759,6 +1823,12 @@ function buildStatusReport(options) {
     report.asarLocalized = isAsarLocalized(
       path.join(checkResources, "app.asar")
     );
+    const i18nGate = inspectI18nGateInAsar(path.join(checkResources, "app.asar"));
+    report.i18nGateStatus = i18nGate.status;
+    report.i18nGateChanged = i18nGate.changedCount;
+    report.i18nGateRecognized = i18nGate.recognizedCount;
+    report.i18nGateAmbiguous = i18nGate.ambiguousCount;
+    report.i18nGateFiles = i18nGate.files;
     if (isWindowsAppsInstall(installInfo.app)) {
       report.messages.push(
         "检测到 Microsoft Store 安装：将在 %USERPROFILE%\\.codex\\zh-cn-patched\\ 维护可写副本；请用安装目录下的「Codex 汉化版.bat」启动。"
@@ -1781,6 +1851,7 @@ function buildStatusReport(options) {
   report.plugins = pluginSummary.details;
   report.patchInstalled =
     report.asarLocalized &&
+    report.i18nGateStatus === "already-enabled" &&
     report.localeZhCn &&
     (report.pluginsTotal === 0 || report.pluginsLocalized === report.pluginsTotal);
 
@@ -1816,6 +1887,11 @@ function printStatusReport(report, asJson) {
   console.log("[env] codexPath=" + (report.codexPath || ""));
   console.log("[env] codexRunning=" + report.codexRunning);
   console.log("[env] asarLocalized=" + report.asarLocalized);
+  console.log("[env] i18nGateStatus=" + (report.i18nGateStatus || ""));
+  console.log("[env] i18nGateChanged=" + report.i18nGateChanged);
+  console.log("[env] i18nGateRecognized=" + report.i18nGateRecognized);
+  console.log("[env] i18nGateAmbiguous=" + report.i18nGateAmbiguous);
+  console.log("[env] i18nGateFiles=" + JSON.stringify(report.i18nGateFiles));
   console.log("[env] asarBackup=" + report.asarBackup);
   console.log("[env] exeBackup=" + report.exeBackup);
   console.log("[env] localeOverride=" + (report.localeOverride || ""));
@@ -1858,21 +1934,23 @@ function parseArgs(argv) {
   return { action, codexPath, json, relaunch };
 }
 
-const options = parseArgs(process.argv);
-try {
-  if (options.action === "status") status(options);
-  else if (options.action === "uninstall") uninstall(options);
-  else if (options.action === "install") install(options);
-  else if (options.action === "save-path") {
-    if (!options.codexPath) throw new Error("save-path 需要 --codex-path");
-    writeSavedCodexPath(options.codexPath);
-    const resolved = resolveCodexInstallDir(options.codexPath);
-    console.log(`[ok] 已保存 Codex 路径: ${resolved.app}`);
-  } else if (options.action === "clear-path") {
-    clearSavedCodexPath();
-    console.log("[ok] 已清除保存的 Codex 路径");
-  } else throw new Error(`未知操作: ${options.action}`);
-} catch (error) {
-  console.error(`[error] ${error.message}`);
-  process.exit(1);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const options = parseArgs(process.argv);
+  try {
+    if (options.action === "status") status(options);
+    else if (options.action === "uninstall") uninstall(options);
+    else if (options.action === "install") install(options);
+    else if (options.action === "save-path") {
+      if (!options.codexPath) throw new Error("save-path 需要 --codex-path");
+      writeSavedCodexPath(options.codexPath);
+      const resolved = resolveCodexInstallDir(options.codexPath);
+      console.log(`[ok] 已保存 Codex 路径: ${resolved.app}`);
+    } else if (options.action === "clear-path") {
+      clearSavedCodexPath();
+      console.log("[ok] 已清除保存的 Codex 路径");
+    } else throw new Error(`未知操作: ${options.action}`);
+  } catch (error) {
+    console.error(`[error] ${error.message}`);
+    process.exit(1);
+  }
 }

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { inspectI18nGateInAsar } from "./patch-codex-zh-cn.mjs";
 
 const asarPath = process.argv[2] || "D:/soft/Codex-win-x64-26.519.81530/resources/app.asar";
 const asar = fs.readFileSync(asarPath);
@@ -41,3 +42,11 @@ console.log("About Codex template:", s.includes("About ${n.app.getName()}"));
 console.log("关于 Codex template:", s.includes("关于 ${n.app.getName()}"));
 console.log("quit Exit role only:", s.includes("{role:`quit`}"));
 console.log("quit 退出 label:", s.includes("{role:`quit`,label:`退出`}"));
+
+const i18nGate = inspectI18nGateInAsar(asarPath);
+if (i18nGate.status !== "already-enabled") {
+  console.error(`[X] enable_i18n fallback: ${i18nGate.status}`);
+  process.exitCode = 1;
+} else {
+  console.log("[OK] enable_i18n fallback: enabled");
+}
