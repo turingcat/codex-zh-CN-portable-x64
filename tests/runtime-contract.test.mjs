@@ -24,7 +24,7 @@ test("pins the official x64 Node runtime and local bootstrap contract", () => {
   assert.match(runtimeContract, /GetNativeSystemInfo/);
   assert.match(bootstrap, /Expand-Archive/);
   assert.match(runtimeContract, /& \$NodePath --version/);
-  assert.match(bootstrap, /"-NodePath", \$nodePath/);
+  assert.match(bootstrap, /NodePath = \$nodePath/);
   assert.doesNotMatch(`${bootstrap}\n${runtimeContract}`, /Invoke-WebRequest|Start-BitsTransfer/);
 });
 
@@ -197,7 +197,7 @@ test("keeps the Server allowance on the gated fixture installer hop", () => {
  );
  const fixtureInstallerHop = bootstrapLines.findIndex(
  (line, index) => index > fixtureBlockIndex &&
- /^\s*\$installerArgs \+= "-AllowServerForTests"\s*$/.test(line),
+    /^\s*\$installerArgs\.AllowServerForTests = \$true\s*$/.test(line),
  );
  assert.ok(gateIndex >= 0, "bootstrap test-action gate is required");
  assert.ok(fixtureBlockIndex >= 0, "fixture installer block is required");

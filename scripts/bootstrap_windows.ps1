@@ -63,15 +63,18 @@ if ($Action -eq "test-fixture") {
     $env:LOCALAPPDATA = Join-Path $fixtureHome "AppData\Local"
 }
 
-$installerArgs = @("-Action", $Action, "-NodePath", $nodePath)
+$installerArgs = @{
+    Action = $Action
+    NodePath = $nodePath
+}
 if ($CodexPath) {
-    $installerArgs += @("-CodexPath", $CodexPath)
+    $installerArgs.CodexPath = $CodexPath
 }
 if ($Action -eq "test-fixture") {
-    $installerArgs += "-AllowServerForTests"
+    $installerArgs.AllowServerForTests = $true
 }
 if ($NoPause) {
-    $installerArgs += "-NoPause"
+    $installerArgs.NoPause = $true
 }
 
 & $installerPath @installerArgs
