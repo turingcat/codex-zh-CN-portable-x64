@@ -17,6 +17,36 @@ import {
   saveLocaleState,
 } from "../scripts/lib/locale-config.mjs";
 
+function windowsCompatibleEnv(home) {
+  return {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: path.join(home, "AppData", "Roaming"),
+    LOCALAPPDATA: path.join(home, "AppData", "Local"),
+  };
+}
+
+test("managed-state child processes receive a Windows-compatible isolated profile", () => {
+  const home = path.join(os.tmpdir(), "managed-state-env");
+  const env = windowsCompatibleEnv(home);
+
+  assert.deepEqual(
+    {
+      HOME: env.HOME,
+      USERPROFILE: env.USERPROFILE,
+      APPDATA: env.APPDATA,
+      LOCALAPPDATA: env.LOCALAPPDATA,
+    },
+    {
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: path.join(home, "AppData", "Roaming"),
+      LOCALAPPDATA: path.join(home, "AppData", "Local"),
+    },
+  );
+});
+
 function createState(overrides = {}) {
   return {
     version: 1,
@@ -191,7 +221,7 @@ function runInstallWithBlockedState(fixture) {
     {
       cwd: fixture.projectRoot,
       encoding: "utf8",
-      env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
     },
   );
 }
@@ -211,7 +241,7 @@ function createHealthyInstalledFixture(t, mode) {
     {
       cwd: fixture.projectRoot,
       encoding: "utf8",
-      env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
     },
   );
   assert.equal(installed.status, 0, installed.stderr + installed.stdout);
@@ -243,7 +273,7 @@ function runManagedStatus(fixture, state) {
   return spawnSync(process.execPath, args, {
     cwd: fixture.projectRoot,
     encoding: "utf8",
-    env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
   });
 }
 
@@ -274,7 +304,7 @@ function runManagedRestore(fixture) {
   return spawnSync(process.execPath, ["scripts/patch-codex-zh-cn.mjs", "uninstall"], {
     cwd: process.cwd(),
     encoding: "utf8",
-    env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
   });
 }
 
@@ -452,7 +482,7 @@ test("status rejects Store state that does not use the exact deterministic layou
   const result = spawnSync(
     process.execPath,
     ["scripts/patch-codex-zh-cn.mjs", "status", "--store-source-identity", "OpenAI.Codex_current", "--json"],
-    { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, HOME: fixture.home } },
+    { cwd: process.cwd(), encoding: "utf8", env: windowsCompatibleEnv(fixture.home) },
   );
   const report = JSON.parse(result.stdout);
   assert.equal(result.status, 2);
@@ -481,7 +511,7 @@ test("status rejects a deterministic managed Store path that resolves through a 
   const result = spawnSync(
     process.execPath,
     ["scripts/patch-codex-zh-cn.mjs", "status", "--store-source-identity", "OpenAI.Codex_current", "--json"],
-    { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, HOME: fixture.home } },
+    { cwd: process.cwd(), encoding: "utf8", env: windowsCompatibleEnv(fixture.home) },
   );
   const report = JSON.parse(result.stdout);
   assert.equal(result.status, 2);
@@ -516,7 +546,7 @@ test("restore leaves files untouched when managed state is missing or invalid", 
     spawnSync(process.execPath, ["scripts/patch-codex-zh-cn.mjs", "uninstall"], {
       cwd: process.cwd(),
       encoding: "utf8",
-      env: { ...process.env, HOME: home },
+    env: windowsCompatibleEnv(home),
     });
   const missing = runRestore();
   assert.equal(missing.status, 0);
@@ -571,7 +601,7 @@ test("Store restore restores exact locale and plugin bytes before removing manag
   const result = spawnSync(process.execPath, ["scripts/patch-codex-zh-cn.mjs", "uninstall"], {
     cwd: process.cwd(),
     encoding: "utf8",
-    env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(fs.readFileSync(configPath).equals(originalConfig), true);
@@ -618,7 +648,7 @@ test("Store restore keeps state and copy after a late failure and succeeds on re
     spawnSync(process.execPath, ["scripts/patch-codex-zh-cn.mjs", "uninstall"], {
       cwd: process.cwd(),
       encoding: "utf8",
-      env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
     });
   const failed = runRestore();
   assert.notEqual(failed.status, 0);
@@ -673,7 +703,7 @@ test("status marks Store state stale when its current WindowsApps package change
   const result = spawnSync(
     process.execPath,
     ["scripts/patch-codex-zh-cn.mjs", "status", "--codex-path", sourceApp, "--store-source-identity", "OpenAI.Codex_current", "--json"],
-    { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, HOME: home } },
+    { cwd: process.cwd(), encoding: "utf8", env: windowsCompatibleEnv(home) },
   );
   const report = JSON.parse(result.stdout);
   assert.equal(result.status, 2);
@@ -715,7 +745,7 @@ test("status marks Store state stale when no current package can be located", (t
   const result = spawnSync(process.execPath, ["scripts/patch-codex-zh-cn.mjs", "status", "--json"], {
     cwd: process.cwd(),
     encoding: "utf8",
-    env: { ...process.env, HOME: home, CODEX_DESKTOP_PATH: path.join(root, "missing") },
+    env: { ...windowsCompatibleEnv(home), CODEX_DESKTOP_PATH: path.join(root, "missing") },
   });
   const report = JSON.parse(result.stdout);
   assert.equal(result.status, 2);
@@ -739,7 +769,7 @@ test("status inspects the active managed Store ASAR and executable pair", (t) =>
     {
       cwd: fixture.projectRoot,
       encoding: "utf8",
-      env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
     },
   );
   assert.equal(installed.status, 0, installed.stderr + installed.stdout);
@@ -771,7 +801,7 @@ test("status inspects the active managed Store ASAR and executable pair", (t) =>
     {
       cwd: fixture.projectRoot,
       encoding: "utf8",
-      env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
     },
   );
   const report = JSON.parse(result.stdout);
@@ -831,7 +861,7 @@ test("status maps an unavailable Store identity to stale and exit code two", (t)
     {
       cwd: process.cwd(),
       encoding: "utf8",
-      env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
     },
   );
   const report = JSON.parse(result.stdout);
@@ -857,7 +887,7 @@ test("status exits two when the managed Store target loses its executable", (t) 
     {
       cwd: fixture.projectRoot,
       encoding: "utf8",
-      env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
     },
   );
   assert.equal(installed.status, 0, installed.stderr + installed.stdout);
@@ -876,7 +906,7 @@ test("status exits two when the managed Store target loses its executable", (t) 
     {
       cwd: fixture.projectRoot,
       encoding: "utf8",
-      env: { ...process.env, HOME: fixture.home },
+    env: windowsCompatibleEnv(fixture.home),
     },
   );
   const report = JSON.parse(result.stdout);

@@ -31,6 +31,16 @@ function writeAsar(asarPath) {
   fs.writeFileSync(asarPath, Buffer.concat([asarHeader, content]));
 }
 
+function windowsCompatibleEnv(home) {
+  return {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: path.join(home, "AppData", "Roaming"),
+    LOCALAPPDATA: path.join(home, "AppData", "Local"),
+  };
+}
+
 test("status marks malformed locale backup as not restorable", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "locale-status-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -59,7 +69,7 @@ test("status marks malformed locale backup as not restorable", (t) => {
   const result = spawnSync(
     process.execPath,
     ["scripts/patch-codex-zh-cn.mjs", "status", "--codex-path", installRoot, "--json"],
-    { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, HOME: homeDir } },
+    { cwd: process.cwd(), encoding: "utf8", env: windowsCompatibleEnv(homeDir) },
   );
 
   assert.equal(result.status, 2);
