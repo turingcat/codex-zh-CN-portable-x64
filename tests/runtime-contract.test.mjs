@@ -144,3 +144,57 @@ test("routes root Windows entry points through fixed bootstrap actions", () => {
     assert.match(wrapper, /if not "%EXIT_CODE%"=="0" pause/);
   }
 });
+
+test("allows Windows Server only through the explicitly gated test runtime path", () => {
+ const runtimeContract = read("scripts/runtime-contract.ps1");
+ const bootstrap = read("scripts/bootstrap_windows.ps1");
+ const installer = read("scripts/install_windows.ps1");
+ const packageScript = read("scripts/package-release.ps1");
+
+ assert.match(
+ runtimeContract,
+ /function Assert-SupportedWindowsAmd64[\s\S]*?param\([\s\S]*?\[switch\]\$AllowServerForTests[\s\S]*?\$windowsVersion\.InstallationType -ne "Client"[\s\S]*?\$AllowServerForTests[\s\S]*?CODEX_ZH_CN_TEST_FIXTURE/,
+ );
+ assert.match(
+ runtimeContract,
+ /function Get-VerifiedRuntime[\s\S]*?param\([\s\S]*?\[switch\]\$AllowServerForTests[\s\S]*?Assert-SupportedWindowsAmd64 -AllowServerForTests:\$AllowServerForTests/,
+ );
+
+ const gateIndex = bootstrap.indexOf('$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"');
+ const testRuntimeCall = bootstrap.indexOf(
+ "Get-VerifiedRuntime -ProjectRoot $projectRoot -AllowServerForTests",
+ );
+ const defaultRuntimeCall = bootstrap.indexOf(
+ "Get-VerifiedRuntime -ProjectRoot $projectRoot\n",
+ );
+ assert.ok(gateIndex >= 0, "bootstrap test-action gate is required");
+ assert.ok(testRuntimeCall > gateIndex, "Server allowance must follow the test gate");
+ assert.notEqual(defaultRuntimeCall, testRuntimeCall, "normal bootstrap path remains default");
+
+ assert.doesNotMatch(packageScript, /AllowServerForTests/);
+});
+
+test("keeps the Server allowance on the gated fixture installer hop", () => {
+ const bootstrap = read("scripts/bootstrap_windows.ps1");
+ const installer = read("scripts/install_windows.ps1");
+
+ assert.match(installer, /\[switch\]\$AllowServerForTests/);
+ assert.match(
+ installer,
+ /if \(\$AllowServerForTests\) \{[\s\S]*?Get-VerifiedRuntime -ProjectRoot \$projectRoot -AllowServerForTests[\s\S]*?\} else \{[\s\S]*?Get-VerifiedRuntime -ProjectRoot \$projectRoot/,
+ );
+ assert.match(
+ installer,
+ /\$Action -in @\("test", "test-fixture"\) -and \$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"/,
+ );
+
+ const gateIndex = bootstrap.indexOf('$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"');
+ const fixtureInstallerHop = bootstrap.indexOf(
+ 'if ($Action -eq "test-fixture") {\n    $installerArgs += "-AllowServerForTests"',
+ );
+ assert.ok(gateIndex >= 0, "bootstrap test-action gate is required");
+ assert.ok(
+ fixtureInstallerHop > gateIndex,
+ "fixture installer allowance must follow the test gate",
+ );
+});

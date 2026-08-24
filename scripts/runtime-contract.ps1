@@ -1,4 +1,8 @@
 function Assert-SupportedWindowsAmd64 {
+    param(
+        [switch]$AllowServerForTests
+    )
+
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         throw "This bundle requires Windows 10 or Windows 11 on AMD64."
     }
@@ -63,7 +67,7 @@ public static class CodexRuntimeNative
         }
 
         $windowsVersion = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction Stop
-        if ($windowsVersion.InstallationType -ne "Client") {
+        if ($windowsVersion.InstallationType -ne "Client" -and -not ($AllowServerForTests -and $env:CODEX_ZH_CN_TEST_FIXTURE -eq "1")) {
             throw "This bundle requires a Windows client installation."
         }
 
@@ -129,9 +133,12 @@ function Get-ArchiveEntrySha256 {
 }
 
 function Get-VerifiedRuntime {
-    param([string]$ProjectRoot)
+    param(
+        [string]$ProjectRoot,
+        [switch]$AllowServerForTests
+    )
 
-    Assert-SupportedWindowsAmd64
+    Assert-SupportedWindowsAmd64 -AllowServerForTests:$AllowServerForTests
 
     $runtimeRoot = Join-Path $ProjectRoot "runtime"
     $manifestPath = Join-Path $runtimeRoot "runtime.json"

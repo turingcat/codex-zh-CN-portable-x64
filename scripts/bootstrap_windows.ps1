@@ -17,7 +17,11 @@ if ($Action -in @("test", "test-fixture") -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne
     throw "Test actions are disabled outside the smoke harness."
 }
 
-$runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot
+if ($Action -in @("test", "test-fixture")) {
+    $runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot -AllowServerForTests
+} else {
+    $runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot
+}
 $nodePath = $runtime.NodePath
 
 if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) {
@@ -62,6 +66,9 @@ if ($Action -eq "test-fixture") {
 $installerArgs = @("-Action", $Action, "-NodePath", $nodePath)
 if ($CodexPath) {
     $installerArgs += @("-CodexPath", $CodexPath)
+}
+if ($Action -eq "test-fixture") {
+    $installerArgs += "-AllowServerForTests"
 }
 if ($NoPause) {
     $installerArgs += "-NoPause"

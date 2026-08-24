@@ -6,7 +6,8 @@
     [Parameter(Mandatory = $true)]
     [string]$NodePath,
     [switch]$Interactive,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$AllowServerForTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -512,6 +513,10 @@ if ($Action -in @("test", "test-fixture") -and $env:CODEX_ZH_CN_TEST_FIXTURE -ne
     throw "Test actions are disabled outside the smoke harness."
 }
 
+if ($AllowServerForTests -and ($Action -notin @("test", "test-fixture") -or $env:CODEX_ZH_CN_TEST_FIXTURE -ne "1")) {
+    throw "AllowServerForTests is restricted to gated test actions."
+}
+
 if ($Interactive -or $Action -in @("menu", "install", "uninstall", "restore", "verify")) {
     $elevatedExitCode = Ensure-Administrator
     if ($null -ne $elevatedExitCode) {
@@ -519,7 +524,11 @@ if ($Interactive -or $Action -in @("menu", "install", "uninstall", "restore", "v
     }
 }
 
-$runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot
+if ($AllowServerForTests) {
+    $runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot -AllowServerForTests
+} else {
+    $runtime = Get-VerifiedRuntime -ProjectRoot $projectRoot
+}
 $NodePath = Assert-VerifiedBundledNode -Runtime $runtime -NodePath $NodePath
 
 if ($Interactive -or $Action -eq "menu") {
