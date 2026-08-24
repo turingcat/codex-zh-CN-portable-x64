@@ -50,11 +50,32 @@ test("Windows CI uses bundled runtime and scopes test permission to each test st
   );
   assert.match(
     workflow,
-    /- name: Windows fixture smoke[\s\S]*?env:\s*\n\s+CODEX_ZH_CN_TEST_FIXTURE: "1"[\s\S]*?run: \.\\tests\\windows-smoke\.ps1/,
+    /- name: Windows fixture smoke[\s\S]*?env:\s*\n\s+CODEX_ZH_CN_TEST_FIXTURE: "1"[\s\S]*?run:\s*\|[\s\S]*?\.\\tests\\windows-smoke\.ps1/,
   );
   assert.equal((workflow.match(/CODEX_ZH_CN_TEST_FIXTURE/g) ?? []).length, 2);
   assert.doesNotMatch(
     workflow,
     /actions\/setup-node|npm\s+(?:ci|install)|Invoke-WebRequest|Start-BitsTransfer|curl\b/,
   );
+});
+
+test("Windows CI pins TEMP and TMP to the canonical runner temp directory in both steps", () => {
+  const workflow = read(".github/workflows/windows-smoke.yml");
+  const steps = workflow.split(/(?=^\s*- name:)/m).filter((step) =>
+    /- name: (?:Node tests with bundled runtime|Windows fixture smoke)/.test(step),
+  );
+
+  assert.equal(steps.length, 2);
+  for (const step of steps) {
+    const tempAssignment = step.indexOf("$env:TEMP = $env:RUNNER_TEMP");
+    const tmpAssignment = step.indexOf("$env:TMP = $env:RUNNER_TEMP");
+    const bootstrapInvocation = step.indexOf("bootstrap_windows.ps1");
+    const smokeInvocation = step.indexOf(".\\tests\\windows-smoke.ps1");
+    const invocation = Math.max(bootstrapInvocation, smokeInvocation);
+
+    assert.ok(tempAssignment >= 0, "TEMP must use RUNNER_TEMP");
+    assert.ok(tmpAssignment >= 0, "TMP must use RUNNER_TEMP");
+    assert.ok(tempAssignment < invocation, "TEMP must be set before the step command");
+    assert.ok(tmpAssignment < invocation, "TMP must be set before the step command");
+  }
 });

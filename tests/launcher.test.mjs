@@ -108,6 +108,12 @@ test("keeps BAT entry points thin and wires guarded launch ordering", () => {
   assert.ok(launcher.indexOf("Set-CodexLocaleZhCn") < launcher.indexOf("Start-Process"));
 });
 
+test("keeps the PowerShell launcher encoded as UTF-8 with BOM for Windows PowerShell 5.1", () => {
+  const launcher = fs.readFileSync(launcherPath);
+
+  assert.deepEqual([...launcher.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+});
+
 test("rejects hostile managed-state schemas and Win32 path spellings", async (t) => {
   if (!requireWindowsPowerShell(t)) return;
 

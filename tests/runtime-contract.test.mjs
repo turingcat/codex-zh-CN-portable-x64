@@ -188,11 +188,19 @@ test("keeps the Server allowance on the gated fixture installer hop", () => {
  /\$Action -in @\("test", "test-fixture"\) -and \$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"/,
  );
 
- const gateIndex = bootstrap.indexOf('$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"');
- const fixtureInstallerHop = bootstrap.indexOf(
- 'if ($Action -eq "test-fixture") {\n    $installerArgs += "-AllowServerForTests"',
+ const bootstrapLines = bootstrap.split(/\r?\n/);
+ const gateIndex = bootstrapLines.findIndex((line) =>
+ /\$env:CODEX_ZH_CN_TEST_FIXTURE -ne "1"/.test(line),
+ );
+ const fixtureBlockIndex = bootstrapLines.findIndex((line) =>
+ /^\s*if \(\$Action -eq "test-fixture"\)\s*\{\s*$/.test(line),
+ );
+ const fixtureInstallerHop = bootstrapLines.findIndex(
+ (line, index) => index > fixtureBlockIndex &&
+ /^\s*\$installerArgs \+= "-AllowServerForTests"\s*$/.test(line),
  );
  assert.ok(gateIndex >= 0, "bootstrap test-action gate is required");
+ assert.ok(fixtureBlockIndex >= 0, "fixture installer block is required");
  assert.ok(
  fixtureInstallerHop > gateIndex,
  "fixture installer allowance must follow the test gate",

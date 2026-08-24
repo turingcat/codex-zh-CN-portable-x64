@@ -13,9 +13,15 @@ jobs:
         shell: powershell
         env:
           CODEX_ZH_CN_TEST_FIXTURE: "1"
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap_windows.ps1 -Action test -NoPause
+        run: |
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap_windows.ps1 -Action test -NoPause
       - name: Windows fixture smoke
         shell: powershell
         env:
           CODEX_ZH_CN_TEST_FIXTURE: "1"
-        run: .\tests\windows-smoke.ps1
+        run: |
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          .\tests\windows-smoke.ps1
